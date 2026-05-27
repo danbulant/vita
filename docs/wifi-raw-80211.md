@@ -45,14 +45,7 @@ This matters because many Marvell fullmac-style chips perform 802.11 management 
 
 ## StreetPass Comparison
 
-The 3DS StreetPass design uses raw 802.11 management frames:
-
-- Repeated probe requests with SSID `Nintendo_3DS_continuous_scan_000`.
-- Vendor-specific Nintendo information elements containing service IDs and an 8-byte console ID.
-- Probe responses and vendor action frames without normal authentication/association.
-- Later encrypted data frames using CCMP.
-
-Recreating this class of behavior on the Vita requires control over probe request/probe response/action frame contents, including vendor-specific IEs. The documented Vita APIs do not provide that control.
+Detailed 3DS StreetPass notes now live in `docs/3ds-streetpass.md`. For Vita purposes, the key comparison is that classic StreetPass requires control over probe requests, probe responses, Nintendo vendor action frames, and CCMP-encrypted 802.11 data frames. The documented Vita APIs do not provide that control.
 
 ## Feasibility Assessment
 
@@ -126,6 +119,5 @@ Implication: there is a real command interface to the Marvell/Robin firmware. Th
 - Local FAGDec output: `vitadump/ux0:/FAGDec/sys/external/*.suprx.elf`
 - Local wiki dump: `doc-dump/henkaku-wiki.xml`, pages `SceWlanBt`, `SceNetPs`, `SceSblFwLoader`, and `Robin`
 - VitaSDK headers: `include/psp2/net/net.h`, `include/psp2common/net.h`, `include/psp2/net/netctl.h`, `include/psp2/net/adhoc_matching.h`
-- 3dbrew StreetPass: https://3dbrew.org/wiki/StreetPass
 - HENkaku wiki: https://wiki.henkaku.xyz/vita/Main_Page
 - VitaSDK: https://vitasdk.org/

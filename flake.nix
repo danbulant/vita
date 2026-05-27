@@ -18,9 +18,28 @@
           retdec
           pkgs.bintools
           pkgs.binwalk
+          pkgs.ctrtool
+          pkgs.fuse3
+          pkgs.mtools
+          pkgs.openssl
           pkgs.p7zip
+          pkgs.sleuthkit
+          pkgs.aircrack-ng
+          pkgs.hostapd
+          pkgs.iw
+          pkgs.tcpdump
+          pkgs.wireshark-cli
           (pkgs.python3.withPackages (pythonPackages: [
+            pythonPackages.construct
+            pythonPackages.cryptography
+            pythonPackages.fusepy
             pythonPackages.mcp
+            pythonPackages.pip
+            pythonPackages.pycryptodome
+            pythonPackages.pycryptodomex
+            pythonPackages.pyfatfs
+            pythonPackages.setuptools
+            pythonPackages.wheel
           ]))
         ];
 
