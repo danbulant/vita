@@ -85,6 +85,35 @@ Useful `SceNetPs.bootfs.elf` strings found so far:
 - `fake_3g_if`
 - `bnet_socket_sanity_check`
 
+## Ghidra Annotations
+
+The following annotations were applied and saved in `SceWlanBt.bootfs.elf` in the `VitaWifiGhidra` project:
+
+- `0x81001cd4` renamed to `HandleRobinWlanRxMessage`.
+- `0x810020a8` renamed to `PollRobinWlanRxPackets`.
+- `0x8100271c` renamed to `InitializeRobinWlanQueues`.
+- `0x81002db4` renamed to `QueueRobinCommandAsync`.
+- `0x81002f44` renamed to `SendRobinCommandSync`.
+- `0x81006a6c` renamed to `BuildAndSendRobinScanCommand`.
+- `0x81004b10` renamed to `BuildAndSendRobinJoinCommand`.
+- `0x8100b570` renamed to `HandleWlanConnectRequest`.
+- `0x8100940c` renamed to `InitializeWlanDriverContext`.
+- `0x81003144` renamed to `HandleWlanRxInterrupt`.
+- `0x810030c8` renamed to `TransmitQueuedRobinCommand`.
+- `0x81003514` renamed to `SendRobinSimpleCommand28`.
+
+Important command ids observed in this pass:
+
+- `0x06`: scan command built by `BuildAndSendRobinScanCommand`.
+- `0x12`: join/association command built by `BuildAndSendRobinJoinCommand`.
+- `0x28`: simple control command with a 2-byte payload in `SendRobinSimpleCommand28`.
+- Command responses are matched as `cmd | 0x8000` by `HandleRobinWlanRxMessage`.
+
+Potentially useful custom-IE angles:
+
+- `BuildAndSendRobinScanCommand` has an optional extra payload path up to `0x400` bytes.
+- `BuildAndSendRobinJoinCommand` builds several 802.11 IE-like fields, including vendor-specific tag `0xdd`, but this is still firmware-controlled join/association behavior rather than arbitrary frame TX.
+
 ## Interesting Existing Files
 
 - `vitadump/ur0:/tai/net_logging_mgr.skprx` is present and may be worth separate inspection if decrypted; the name suggests network logging hooks, but strings did not reveal useful details in the dumped SELF.

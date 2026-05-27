@@ -58,7 +58,7 @@ Recreating this class of behavior on the Vita requires control over probe reques
 
 Confidence: medium-high that normal homebrew cannot do raw 802.11 injection with existing public APIs.
 
-Confidence: medium that a kernel plugin alone may still not be sufficient unless an internal WLAN driver command path can be found. The kernel stack has `SceWlanBt`, `SceNetPs`, SDIO, and Robin firmware loading components, but the public documentation currently exposes configuration and netdev/IP-stack plumbing rather than a management-frame transmit API.
+Confidence: medium that a kernel plugin alone may still not be sufficient unless an internal WLAN driver command path can be found. Ghidra analysis confirms `SceWlanBt` has a host-to-Robin command/response path, but the visible commands analyzed so far look like scan/join/control commands rather than arbitrary management-frame transmit primitives.
 
 Likely routes, from easiest to hardest:
 
@@ -67,13 +67,42 @@ Likely routes, from easiest to hardest:
 3. Reverse `SceWlanBt` and the Robin firmware command protocol to find whether a host command can send custom probe/action frames or vendor IEs.
 4. Patch Robin firmware or replace parts of the WLAN driver path to add a custom management-frame transmit primitive.
 
+## Ghidra Findings
+
+Analysis was performed on the extracted bootfs modules and Robin firmware in the `VitaWifiGhidra` project.
+
+Renamed/commented `SceWlanBt.bootfs.elf` functions:
+
+- `InitializeWlanDriverContext` at `0x8100940c`: creates `SceWlanBtRobinWlanContext`, initializes Robin WLAN state, registers `SceNetDrvWlan`, and starts the Robin worker thread.
+- `InitializeRobinWlanQueues` at `0x8100271c`: creates event flag/mutex objects named `SceWlanBtRobinWlanCommand`, allocates a 0x1000-byte `SceWlanBtRobinWlan` buffer, and a 0x4000-byte `SceWlanBtRobinWlanSdioAggrRx` buffer.
+- `HandleRobinWlanRxMessage` at `0x81001cd4`: central RX/message handler. Message type `1` is a command response. It expects `response_cmd == queued_cmd | 0x8000` and a matching sequence byte; nonzero result sets error `0x80418004`. Message type `0` carries RX packet data; subtype `0x02` is direct packet delivery and subtype `0xE6` parses aggregated descriptors.
+- `QueueRobinCommandAsync` at `0x81002db4`: queues a command buffer and signals `SceWlanBtRobinWlanCommand`.
+- `SendRobinCommandSync` at `0x81002f44`: queues a command and waits up to 10 seconds for the response event bit.
+- `BuildAndSendRobinScanCommand` at `0x81006a6c`: builds command id `0x06`. It constructs TLV-like scan parameters for BSSID/SSID/channel list and supports optional extra data up to `0x400` bytes.
+- `BuildAndSendRobinJoinCommand` at `0x81004b10`: builds command id `0x12`. It constructs join/association-style fields including SSID, channel, supported rates, and several IE-like elements such as tags `0x01`, `0x03`, `0x1f`, `0x2d`, `0x30`, and vendor tag `0xdd`.
+- `SendRobinSimpleCommand28` at `0x81003514`: sends command id `0x28` with a small 2-byte payload.
+- `TransmitQueuedRobinCommand` at `0x810030c8`: transmits the current queued command through the lower send primitive when state permits.
+- `HandleWlanRxInterrupt` at `0x81003144`: receives status/interrupt data, updates flags, and calls `PollRobinWlanRxPackets` when RX is pending.
+
+`SceNetPs.bootfs.elf` observations:
+
+- `SceNetPs` initializes kernel packet/thread memory pools named `SceNetKernelDevSend`, `SceNetKernelDevRecv`, `SceNetKernelPkt`, etc.
+- Interface lookup/config paths reference `wlan0`, but the lower-level WLAN command path lives in `SceWlanBt` via `SceNetDrvWlan` registration.
+- No obvious `SceNetPs` raw 802.11 injection path was found in this first pass; it looks like IP-stack/netdev plumbing.
+
+Robin firmware observations:
+
+- Imported `wlanbt_robin_img_ax.skprx.elf` has no functions auto-created by Ghidra yet, but strings include `MacMgmtSMEMsgQ`, `Marvell Micro AP`, and the firmware ID string `$Id: w8787-Ax, RF878X, FP65, 14.65.9.p223, BT_SDIO $`.
+
+Implication: there is a real command interface to the Marvell/Robin firmware. The best short-term path is to map command ids around `0x06` scan and `0x12` join and determine whether any command accepts arbitrary/custom IEs or management frames. If only scan/join IE construction is possible, it may allow limited custom IE behavior in normal firmware-controlled frames, but not StreetPass-style arbitrary probe/action frame injection.
+
 ## RE Plan For A Native Implementation
 
 1. Load the extracted bootfs modules into Ghidra: `vitadump/ux0:/FAGDec/kd/bootimage_modules/SceWlanBt.bootfs.elf` and `SceNetPs.bootfs.elf`. Both are valid ARM ELFs but stripped and have no section table.
 2. Load `vitadump/ux0:/FAGDec/kd/wlanbt_robin_img_ax.skprx.elf` into Ghidra as ARM little-endian firmware. It is also a valid ARM ELF but has no section table, so manual load analysis may be needed.
 3. Label known imports/exports from the HENkaku wiki: `SceWlanBtForDriver`, `SceNetPsForDriver`, `SceSdif`, `SceSblFwLoader`, and `SceWlan`.
 4. Trace `SceWlanBt` initialization from firmware load through SDIO setup. The wiki snippet shows `sceSblFwLoaderLockForDriver("os0:kd/wlanbt_robin_img_ax.skprx")` followed by `sceSblFwLoaderLoadForDriver(1, 0, 0x80000, &g_fwLoadedSize)`.
-5. In `SceWlanBt`, start from the strings `SceWlanBtRobinWlanCommand`, `Command failed. (com=0x%04x, resp=0x%04x, result=%d)`, and `Skip unexpected Response. (resp=0x%04x)` to identify the host-to-Robin command/response dispatcher.
+5. In `SceWlanBt`, continue from `BuildAndSendRobinScanCommand` and `BuildAndSendRobinJoinCommand`; document all command ids and payload layouts passed to `SendRobinCommandSync`.
 6. Compare command IDs and buffer layouts against Linux `mwifiex` for Marvell SD8787/88W8787.
 7. Search for commands related to scan, remain-on-channel, host MLME, management frame TX, custom IE, beacon IE, probe request IE, and action frame TX. The decrypted Robin strings make `TxMgmt80211MsgQ`, `MacMgmt80211MsgQ`, and `MacMgmtSMEMsgQ` good firmware-side starting anchors.
 8. If a suitable command exists, prototype a kernel plugin that calls the internal command path and sends a controlled vendor action/probe frame on a fixed channel.
