@@ -14,10 +14,19 @@
       devShells.${system}.default = pkgs.mkShell {
         packages = with reenv.packages.${system}; [
           bindiff
-          ghidra-bin
-          ghidra-mcp
+          ghidra-with-extensions
           retdec
+          pkgs.bintools
+          pkgs.binwalk
+          pkgs.p7zip
+          (pkgs.python3.withPackages (pythonPackages: [
+            pythonPackages.mcp
+          ]))
         ];
+
+        shellHook = ''
+          export GHIDRA_MCP_BRIDGE="${reenv.packages.${system}.ghidra-with-extensions}/libexec/ghidra-mcp/bridge_mcp_ghidra.py"
+        '';
       };
     };
 }

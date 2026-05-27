@@ -1,0 +1,12 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "ghidra": {
+      "type": "local",
+      "command": [
+        "python",
+        "/nix/store/z7k508mgiab0y8iz3hsshv8mb382k1gp-ghidra-with-extensions-12.0.3/libexec/ghidra-mcp/bridge_mcp_ghidra.py"
+      ]
+    }
+  }
+}
