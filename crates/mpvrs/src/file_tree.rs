@@ -2,12 +2,15 @@ use std::fs;
 use std::path::Path;
 use std::time::Instant;
 
-use imgui::{Condition, Ui};
+use imgui::{Condition, StyleVar, Ui};
 
-use crate::audio::is_supported_audio_file;
+use crate::audio::{is_supported_audio_file, PlaybackSnapshot};
 use crate::rendering::{SCREEN_H, SCREEN_W};
 
 const ROOT_PATH: &str = "ux0:/";
+const FILE_ROW_HEIGHT: f32 = 44.0;
+const FILE_ICON_SIZE: f32 = 20.0;
+const FILE_LABEL_INDENT: &str = "      ";
 
 #[derive(Clone, Debug)]
 struct FileEntry {
@@ -76,7 +79,7 @@ impl FileTreeView {
         self.refresh();
     }
 
-    pub fn draw(&mut self, ui: &Ui) -> Option<FileTreeAction> {
+    pub fn draw(&mut self, ui: &Ui, playback: Option<&PlaybackSnapshot>) -> Option<FileTreeAction> {
         let mut action = None;
 
         ui.window("File browser")
@@ -98,23 +101,32 @@ impl FileTreeView {
                     .size([0.0, list_height])
                     .border(true)
                     .build(|| {
+                        let item_padding = ui.push_style_var(StyleVar::FramePadding([8.0, 10.0]));
+                        let item_spacing = ui.push_style_var(StyleVar::ItemSpacing([4.0, 6.0]));
+
                         if self.current_dir != ROOT_PATH {
-                            if ui.selectable_config("[UP] ..##parent").build() {
+                            if draw_file_row(ui, "..##parent", FileRowIcon::Up, false) {
                                 self.go_up();
                             }
                         }
 
                         let mut activated = None;
                         for (idx, entry) in self.entries.iter().enumerate() {
-                            let prefix = if entry.is_dir { "[DIR]" } else { "     " };
-                            let label = format!("{prefix} {}##{}", entry.name, idx);
+                            let icon = if entry.is_dir {
+                                FileRowIcon::Folder
+                            } else if is_supported_audio_file(&entry.path) {
+                                FileRowIcon::Music
+                            } else {
+                                FileRowIcon::File
+                            };
+                            let label = format!("{}{}##{}", FILE_LABEL_INDENT, entry.name, idx);
                             let selected = self.selected == Some(idx);
 
                             if selected && self.focus_selected {
                                 ui.set_keyboard_focus_here();
                             }
 
-                            if ui.selectable_config(&label).selected(selected).build() {
+                            if draw_file_row(ui, &label, icon, selected) {
                                 activated = Some(idx);
                             }
                             if ui.is_item_focused() {
@@ -129,11 +141,24 @@ impl FileTreeView {
                         if let Some(idx) = activated {
                             action = self.activate_entry(idx);
                         }
+
+                        item_spacing.pop();
+                        item_padding.pop();
                     });
 
                 ui.separator();
                 ui.text("Cross: open/play  Circle: up  Triangle: refresh  Select: quit");
-                if !self.status.is_empty() {
+                if let Some(playback) = playback {
+                    let state = if playback.is_playing {
+                        "playing"
+                    } else {
+                        "paused"
+                    };
+                    ui.text(format!(
+                        "Now {state}: {} ({})",
+                        playback.name, playback.status
+                    ));
+                } else if !self.status.is_empty() {
                     ui.text(&self.status);
                 }
             });
@@ -158,6 +183,128 @@ impl FileTreeView {
             self.selected = Some(idx);
             self.status = format!("Unsupported file: {}", entry.path);
             None
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum FileRowIcon {
+    Up,
+    Folder,
+    Music,
+    File,
+}
+
+fn draw_file_row(ui: &Ui, label: &str, icon: FileRowIcon, selected: bool) -> bool {
+    let clicked = ui
+        .selectable_config(label)
+        .selected(selected)
+        .size([0.0, FILE_ROW_HEIGHT])
+        .build();
+
+    let min = ui.item_rect_min();
+    let max = ui.item_rect_max();
+    let y = min[1] + ((max[1] - min[1]) - FILE_ICON_SIZE) * 0.5;
+    let x = min[0] + 8.0;
+    draw_file_icon(ui, icon, [x, y], FILE_ICON_SIZE);
+
+    clicked
+}
+
+fn draw_file_icon(ui: &Ui, icon: FileRowIcon, pos: [f32; 2], size: f32) {
+    let draw_list = ui.get_window_draw_list();
+    let color = [0.86, 0.90, 0.96, 1.0];
+    let accent = [0.42, 0.72, 1.0, 1.0];
+    let x = pos[0];
+    let y = pos[1];
+    let s = size;
+
+    match icon {
+        FileRowIcon::Up => {
+            draw_list
+                .add_triangle(
+                    [x + s * 0.5, y + s * 0.15],
+                    [x + s * 0.12, y + s * 0.55],
+                    [x + s * 0.88, y + s * 0.55],
+                    accent,
+                )
+                .filled(true)
+                .build();
+            draw_list
+                .add_rect(
+                    [x + s * 0.38, y + s * 0.50],
+                    [x + s * 0.62, y + s * 0.90],
+                    accent,
+                )
+                .filled(true)
+                .build();
+        }
+        FileRowIcon::Folder => {
+            draw_list
+                .add_rect(
+                    [x + s * 0.08, y + s * 0.30],
+                    [x + s * 0.44, y + s * 0.48],
+                    accent,
+                )
+                .filled(true)
+                .build();
+            draw_list
+                .add_rect(
+                    [x + s * 0.08, y + s * 0.42],
+                    [x + s * 0.92, y + s * 0.86],
+                    color,
+                )
+                .rounding(2.0)
+                .filled(true)
+                .build();
+        }
+        FileRowIcon::Music => {
+            draw_list
+                .add_line(
+                    [x + s * 0.58, y + s * 0.18],
+                    [x + s * 0.58, y + s * 0.70],
+                    accent,
+                )
+                .thickness(3.0)
+                .build();
+            draw_list
+                .add_line(
+                    [x + s * 0.58, y + s * 0.18],
+                    [x + s * 0.84, y + s * 0.28],
+                    accent,
+                )
+                .thickness(3.0)
+                .build();
+            draw_list
+                .add_circle([x + s * 0.42, y + s * 0.74], s * 0.18, color)
+                .filled(true)
+                .build();
+        }
+        FileRowIcon::File => {
+            draw_list
+                .add_rect(
+                    [x + s * 0.24, y + s * 0.10],
+                    [x + s * 0.78, y + s * 0.90],
+                    color,
+                )
+                .rounding(1.5)
+                .build();
+            draw_list
+                .add_line(
+                    [x + s * 0.36, y + s * 0.40],
+                    [x + s * 0.66, y + s * 0.40],
+                    accent,
+                )
+                .thickness(2.0)
+                .build();
+            draw_list
+                .add_line(
+                    [x + s * 0.36, y + s * 0.58],
+                    [x + s * 0.66, y + s * 0.58],
+                    accent,
+                )
+                .thickness(2.0)
+                .build();
         }
     }
 }

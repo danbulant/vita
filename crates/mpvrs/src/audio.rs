@@ -13,10 +13,10 @@ use minimp3_sys::{
 };
 use vitasdk_sys::{
     sceAppMgrAcquireBgmPort, sceAppMgrReleaseBgmPort, sceAudioOutOpenPort, sceAudioOutOutput,
-    sceAudioOutReleasePort, sceAudioOutSetVolume, sceKernelPowerTick, SCE_AUDIO_OUT_MODE_MONO,
-    SCE_AUDIO_OUT_MODE_STEREO, SCE_AUDIO_OUT_PORT_TYPE_BGM, SCE_AUDIO_VOLUME_FLAG_L_CH,
-    SCE_AUDIO_VOLUME_FLAG_R_CH, SCE_KERNEL_POWER_TICK_DISABLE_AUTO_SUSPEND,
-    SCE_KERNEL_POWER_TICK_DISABLE_OLED_OFF,
+    sceAudioOutReleasePort, sceAudioOutSetVolume, sceKernelPowerLock, sceKernelPowerTick,
+    sceKernelPowerUnlock, SCE_AUDIO_OUT_MODE_MONO, SCE_AUDIO_OUT_MODE_STEREO,
+    SCE_AUDIO_OUT_PORT_TYPE_BGM, SCE_AUDIO_VOLUME_FLAG_L_CH, SCE_AUDIO_VOLUME_FLAG_R_CH,
+    SCE_KERNEL_POWER_TICK_DISABLE_AUTO_SUSPEND, SCE_KERNEL_POWER_TICK_DISABLE_OLED_OFF,
 };
 
 const AUDIO_GRAIN: usize = 960;
@@ -137,6 +137,19 @@ impl AudioPlayer {
         let percent = percent.clamp(0.0, 1.0);
         self.commands.lock().unwrap().seek_to = Some(percent);
     }
+
+    pub fn seek_relative_seconds(&self, seconds: f32) {
+        let snapshot = self.snapshot();
+        let Some(duration) = snapshot.duration_seconds else {
+            return;
+        };
+        if duration <= 0.0 {
+            return;
+        }
+
+        let target = (snapshot.position_seconds + seconds).clamp(0.0, duration);
+        self.seek_percent(target / duration);
+    }
 }
 
 impl Drop for AudioPlayer {
@@ -202,6 +215,11 @@ fn run_audio_thread(
         );
     }
 
+    unsafe {
+        sceKernelPowerLock(SCE_KERNEL_POWER_TICK_DISABLE_AUTO_SUSPEND);
+        sceKernelPowerLock(SCE_KERNEL_POWER_TICK_DISABLE_OLED_OFF);
+    }
+
     let output_channels = info.channels.max(1).min(2) as usize;
     let mut buffer = vec![0_i16; AUDIO_GRAIN * output_channels];
 
@@ -256,6 +274,8 @@ fn run_audio_thread(
     }
 
     unsafe {
+        sceKernelPowerUnlock(SCE_KERNEL_POWER_TICK_DISABLE_OLED_OFF);
+        sceKernelPowerUnlock(SCE_KERNEL_POWER_TICK_DISABLE_AUTO_SUSPEND);
         sceAudioOutReleasePort(port);
         sceAppMgrReleaseBgmPort();
     }

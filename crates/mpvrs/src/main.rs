@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use audio::AudioPlayer;
 use file_tree::{FileTreeAction, FileTreeView};
-use imgui::{BackendFlags, ConfigFlags, Key, NavInput, Ui};
+use imgui::{BackendFlags, ConfigFlags, Key, NavInput, StyleVar, Ui};
 use rendering::{clear_screen, init_vitagl, present, VitaGlImguiRenderer, SCREEN_H, SCREEN_W};
 use vitasdk_sys::{
     sceCtrlPeekBufferPositive, sceCtrlSetSamplingMode, sceTouchPeek, sceTouchSetSamplingState,
@@ -40,9 +40,11 @@ const VITA_IMGUI_KEY_DOWN: u32 = 257;
 const VITA_IMGUI_KEY_LEFT: u32 = 258;
 const VITA_IMGUI_KEY_RIGHT: u32 = 259;
 const VITA_IMGUI_KEY_CROSS: u32 = 260;
+const SEEK_STEP_SECONDS: f32 = 10.0;
 
 struct AppState {
     page: Page,
+    player: Option<AudioPlayer>,
 }
 
 enum Page {
@@ -52,24 +54,25 @@ enum Page {
 
 struct PlayerView {
     browser: FileTreeView,
-    player: AudioPlayer,
     error: Option<String>,
+    seek_focused: bool,
 }
 
 impl PlayerView {
-    fn open(browser: FileTreeView, path: String) -> Result<Self, (FileTreeView, String)> {
-        match AudioPlayer::open(path) {
-            Ok(player) => Ok(Self {
-                browser,
-                player,
-                error: None,
-            }),
-            Err(err) => Err((browser, err)),
+    fn new(browser: FileTreeView) -> Self {
+        Self {
+            browser,
+            error: None,
+            seek_focused: false,
         }
     }
 
-    fn draw(&mut self, ui: &Ui) {
-        let snapshot = self.player.snapshot();
+    fn draw(&mut self, ui: &Ui, player: Option<&AudioPlayer>) {
+        let Some(player) = player else {
+            self.draw_empty(ui);
+            return;
+        };
+        let snapshot = player.snapshot();
 
         ui.window("Now playing")
             .position([0.0, 0.0], imgui::Condition::Always)
@@ -104,20 +107,25 @@ impl PlayerView {
                     format!("{} / --:--", format_time(snapshot.position_seconds))
                 };
 
-                if snapshot.duration_seconds.is_some() {
-                    if ui.slider("##seek", 0.0_f32, 1.0_f32, &mut progress) {
-                        self.player.seek_percent(progress);
-                    }
-                } else {
-                    imgui::ProgressBar::new(0.0).overlay_text(&label).build(ui);
+                let seek_padding = ui.push_style_var(StyleVar::FramePadding([0.0, 10.0]));
+                if ui
+                    .slider_config("##seek", 0.0_f32, 1.0_f32)
+                    .display_format("")
+                    .build(&mut progress)
+                {
+                    player.seek_percent(progress);
                 }
+                self.seek_focused = ui.is_item_focused();
+                seek_padding.pop();
                 ui.text(label);
 
                 ui.spacing();
+                let button_padding = ui.push_style_var(StyleVar::FramePadding([16.0, 12.0]));
                 let button = if snapshot.is_playing { "Pause" } else { "Play" };
-                if ui.button(button) {
-                    self.player.toggle_play_pause();
+                if ui.button_with_size(button, [136.0, 48.0]) {
+                    player.toggle_play_pause();
                 }
+                button_padding.pop();
 
                 if !snapshot.status.is_empty() {
                     ui.same_line();
@@ -131,6 +139,23 @@ impl PlayerView {
                 ui.text("Cross: play/pause/seek  Circle: file browser  Select: quit");
             });
     }
+
+    fn draw_empty(&mut self, ui: &Ui) {
+        ui.window("Now playing")
+            .position([0.0, 0.0], imgui::Condition::Always)
+            .size([SCREEN_W as f32, SCREEN_H as f32], imgui::Condition::Always)
+            .movable(false)
+            .resizable(false)
+            .collapsible(false)
+            .build(|| {
+                ui.text("No track loaded");
+                if let Some(error) = &self.error {
+                    ui.text(format!("Error: {error}"));
+                }
+                ui.separator();
+                ui.text("Circle: file browser  Select: quit");
+            });
+    }
 }
 
 fn format_time(seconds: f32) -> String {
@@ -142,6 +167,7 @@ impl AppState {
     fn new() -> Self {
         Self {
             page: Page::FileTree(FileTreeView::new()),
+            player: None,
         }
     }
 
@@ -166,11 +192,24 @@ impl AppState {
         }
     }
 
+    fn seek_relative_seconds(&self, seconds: f32) {
+        let Page::Player(page) = &self.page else {
+            return;
+        };
+        if !page.seek_focused {
+            return;
+        }
+        if let Some(player) = &self.player {
+            player.seek_relative_seconds(seconds);
+        }
+    }
+
     fn draw(&mut self, ui: &Ui) {
+        let playback = self.player.as_ref().map(|player| player.snapshot());
         let action = match &mut self.page {
-            Page::FileTree(page) => page.draw(ui),
+            Page::FileTree(page) => page.draw(ui, playback.as_ref()),
             Page::Player(page) => {
-                page.draw(ui);
+                page.draw(ui, self.player.as_ref());
                 None
             }
         };
@@ -182,9 +221,15 @@ impl AppState {
                 unreachable!();
             };
 
-            match PlayerView::open(browser, path) {
-                Ok(player) => self.page = Page::Player(player),
-                Err((mut browser, err)) => {
+            self.player = None;
+
+            match AudioPlayer::open(path) {
+                Ok(player) => {
+                    self.player = Some(player);
+                    self.page = Page::Player(PlayerView::new(browser));
+                }
+                Err(err) => {
+                    let mut browser = browser;
                     browser.set_status(format!("Failed to open audio: {err}"));
                     self.page = Page::FileTree(browser);
                 }
@@ -225,6 +270,12 @@ fn main() {
         }
         if (just_pressed & SCE_CTRL_CIRCLE) != 0 {
             app.back();
+        }
+        if (just_pressed & SCE_CTRL_LEFT) != 0 {
+            app.seek_relative_seconds(-SEEK_STEP_SECONDS);
+        }
+        if (just_pressed & SCE_CTRL_RIGHT) != 0 {
+            app.seek_relative_seconds(SEEK_STEP_SECONDS);
         }
 
         let touch = read_front_touch();
