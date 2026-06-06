@@ -57,6 +57,11 @@
 
           vitasdk.packages.${system}.vitasdk
           vitasdk.packages.${system}.vitaGL
+          vitasdk.packages.${system}.vitaShaRK
+          vitasdk.packages.${system}.libmathneon
+          vitasdk.packages.${system}.SceShaccCgExt
+          vitasdk.packages.${system}.taihen
+          vitasdk.packages.${system}.sdl2
           bindiff
           ghidra-with-extensions
           retdec

@@ -1,0 +1,23 @@
+[package]
+name = "mpvrs"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+imgui = "=0.12.0"
+vitasdk-sys = { version = "0.3.3", features = [
+    "SceAppMgr_stub",
+    "SceCommonDialog_stub",
+    "SceCtrl_stub",
+    "SceDisplay_stub",
+    "SceGxm_stub",
+    "SceIme_stub",
+    "SceKernelDmacMgr_stub",
+    "SceSysmem_stub",
+    "SceTouch_stub",
+] }
+
+[package.metadata.vita]
+title_id = "MPVRS0001"
+title_name = "mpvrs"
+assets = "./static"
