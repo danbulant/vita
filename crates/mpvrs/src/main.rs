@@ -38,7 +38,6 @@ const VITA_IMGUI_KEY_DOWN: u32 = 257;
 const VITA_IMGUI_KEY_LEFT: u32 = 258;
 const VITA_IMGUI_KEY_RIGHT: u32 = 259;
 const VITA_IMGUI_KEY_CROSS: u32 = 260;
-const VITA_IMGUI_KEY_CIRCLE: u32 = 261;
 
 struct AppState {
     page: Page,
@@ -58,12 +57,6 @@ impl AppState {
     fn refresh(&mut self) {
         match &mut self.page {
             Page::FileTree(page) => page.refresh(),
-        }
-    }
-
-    fn activate(&mut self) {
-        match &mut self.page {
-            Page::FileTree(page) => page.open_selected(),
         }
     }
 
@@ -110,9 +103,6 @@ fn main() {
         if (just_pressed & SCE_CTRL_TRIANGLE) != 0 {
             app.refresh();
         }
-        if (just_pressed & SCE_CTRL_CROSS) != 0 {
-            app.activate();
-        }
         if (just_pressed & SCE_CTRL_CIRCLE) != 0 {
             app.back();
         }
@@ -156,7 +146,7 @@ fn configure_imgui_io(imgui: &mut imgui::Context) {
     io.key_map[Key::LeftArrow as usize] = VITA_IMGUI_KEY_LEFT;
     io.key_map[Key::RightArrow as usize] = VITA_IMGUI_KEY_RIGHT;
     io.key_map[Key::Enter as usize] = VITA_IMGUI_KEY_CROSS;
-    io.key_map[Key::Escape as usize] = VITA_IMGUI_KEY_CIRCLE;
+
     io.key_map[Key::Space as usize] = VITA_IMGUI_KEY_CROSS;
 }
 
@@ -207,14 +197,12 @@ fn apply_controller_to_imgui(io: &mut imgui::Io, ctrl: &SceCtrlData) {
     set_key(io, VITA_IMGUI_KEY_LEFT, pressed(ctrl, SCE_CTRL_LEFT));
     set_key(io, VITA_IMGUI_KEY_RIGHT, pressed(ctrl, SCE_CTRL_RIGHT));
     set_key(io, VITA_IMGUI_KEY_CROSS, pressed(ctrl, SCE_CTRL_CROSS));
-    set_key(io, VITA_IMGUI_KEY_CIRCLE, pressed(ctrl, SCE_CTRL_CIRCLE));
 
     for input in NavInput::VARIANTS {
         io.nav_inputs[input as usize] = 0.0;
     }
 
     set_nav_button(io, NavInput::Activate, pressed(ctrl, SCE_CTRL_CROSS));
-    set_nav_button(io, NavInput::Cancel, pressed(ctrl, SCE_CTRL_CIRCLE));
     set_nav_button(io, NavInput::Menu, pressed(ctrl, SCE_CTRL_SQUARE));
     set_nav_button(io, NavInput::Input, pressed(ctrl, SCE_CTRL_TRIANGLE));
     set_nav_button(io, NavInput::DpadLeft, pressed(ctrl, SCE_CTRL_LEFT));

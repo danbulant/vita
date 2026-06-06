@@ -21,6 +21,7 @@ pub struct FileTreeView {
     selected: Option<usize>,
     status: String,
     last_refresh: Instant,
+    focus_selected: bool,
 }
 
 impl FileTreeView {
@@ -31,6 +32,7 @@ impl FileTreeView {
             selected: None,
             status: String::new(),
             last_refresh: Instant::now(),
+            focus_selected: true,
         };
         view.refresh();
         view
@@ -40,31 +42,18 @@ impl FileTreeView {
         match read_one_level(&self.current_dir) {
             Ok(entries) => {
                 self.entries = entries;
-                self.selected = self.selected.filter(|&idx| idx < self.entries.len());
-                self.status = format!("{} entries in {}", self.entries.len(), self.current_dir);
+                self.selected = first_entry_index(&self.entries);
+                self.status.clear();
+                self.focus_selected = true;
             }
             Err(err) => {
                 self.entries.clear();
                 self.selected = None;
                 self.status = format!("Failed to read {}: {err}", self.current_dir);
+                self.focus_selected = false;
             }
         }
         self.last_refresh = Instant::now();
-    }
-
-    pub fn open_selected(&mut self) {
-        let Some(entry) = self.selected_entry().cloned() else {
-            self.status = "No entry selected".to_owned();
-            return;
-        };
-
-        if entry.is_dir {
-            self.current_dir = ensure_trailing_slash(&entry.path);
-            self.selected = None;
-            self.refresh();
-        } else {
-            self.status = format!("Selected file: {}", entry.path);
-        }
     }
 
     pub fn go_up(&mut self) {
@@ -74,46 +63,25 @@ impl FileTreeView {
         }
 
         self.current_dir = parent_dir(&self.current_dir);
-        self.selected = None;
         self.refresh();
     }
 
     pub fn draw(&mut self, ui: &Ui) {
-        ui.window("mpvrs")
+        ui.window("File browser")
             .position([0.0, 0.0], Condition::Always)
             .size([SCREEN_W as f32, SCREEN_H as f32], Condition::Always)
             .movable(false)
             .resizable(false)
             .collapsible(false)
             .build(|| {
-                ui.text("File browser");
-                ui.same_line();
-                if ui.button("Refresh (Triangle)") {
-                    self.refresh();
-                }
-                ui.same_line();
-                if ui.button("Up (Circle)") {
-                    self.go_up();
-                }
-
-                ui.separator();
-                ui.text(format!("Path: {}", self.current_dir));
-                ui.text(&self.status);
-
-                if let Some(selected) = self.selected_entry() {
-                    let action = if selected.is_dir {
-                        "Cross opens"
-                    } else {
-                        "Cross selects"
-                    };
-                    ui.text(format!("{action}: {}", selected.path));
-                } else {
-                    ui.text("Select with touch/d-pad. Cross opens folders. Circle goes up.");
-                }
-
+                ui.text(format!(
+                    "{} — {} entries",
+                    self.current_dir,
+                    self.entries.len()
+                ));
                 ui.separator();
 
-                let list_height = SCREEN_H as f32 - 170.0;
+                let list_height = SCREEN_H as f32 - 112.0;
                 ui.child_window("files")
                     .size([0.0, list_height])
                     .border(true)
@@ -124,22 +92,50 @@ impl FileTreeView {
                             }
                         }
 
+                        let mut activated = None;
                         for (idx, entry) in self.entries.iter().enumerate() {
                             let prefix = if entry.is_dir { "[DIR]" } else { "     " };
                             let label = format!("{prefix} {}##{}", entry.name, idx);
                             let selected = self.selected == Some(idx);
 
+                            if selected && self.focus_selected {
+                                ui.set_keyboard_focus_here();
+                            }
+
                             if ui.selectable_config(&label).selected(selected).build() {
+                                activated = Some(idx);
+                            }
+                            if ui.is_item_focused() {
                                 self.selected = Some(idx);
-                                self.status = format!("Selected {}", entry.path);
+                                self.focus_selected = false;
+                            }
+                            if selected {
+                                ui.set_item_default_focus();
                             }
                         }
+
+                        if let Some(idx) = activated {
+                            self.activate_entry(idx);
+                        }
                     });
+
+                ui.separator();
+                ui.text("Cross: open/select  Circle: up  Triangle: refresh  Select: quit");
             });
     }
 
-    fn selected_entry(&self) -> Option<&FileEntry> {
-        self.selected.and_then(|idx| self.entries.get(idx))
+    fn activate_entry(&mut self, idx: usize) {
+        let Some(entry) = self.entries.get(idx).cloned() else {
+            return;
+        };
+
+        if entry.is_dir {
+            self.current_dir = ensure_trailing_slash(&entry.path);
+            self.refresh();
+        } else {
+            self.selected = Some(idx);
+            self.status = format!("Selected file: {}", entry.path);
+        }
     }
 }
 
@@ -166,6 +162,14 @@ fn read_one_level(root: &str) -> Result<Vec<FileEntry>, std::io::Error> {
     });
 
     Ok(entries)
+}
+
+fn first_entry_index(entries: &[FileEntry]) -> Option<usize> {
+    if entries.is_empty() {
+        None
+    } else {
+        Some(0)
+    }
 }
 
 fn path_to_string(path: &Path) -> String {
