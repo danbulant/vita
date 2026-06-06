@@ -35,6 +35,16 @@ const ROOT_PATH: &str = "ux0:/";
 const VITA_TOUCH_W: f32 = 1919.0;
 const VITA_TOUCH_H: f32 = 1087.0;
 
+// Dear ImGui's legacy `io.KeyMap` maps ImGui keys to indices in
+// `io.KeysDown`, so values must be small key indices (< 512), not platform
+// button bitmasks like `SCE_CTRL_UP`.
+const VITA_IMGUI_KEY_UP: u32 = 256;
+const VITA_IMGUI_KEY_DOWN: u32 = 257;
+const VITA_IMGUI_KEY_LEFT: u32 = 258;
+const VITA_IMGUI_KEY_RIGHT: u32 = 259;
+const VITA_IMGUI_KEY_CROSS: u32 = 260;
+const VITA_IMGUI_KEY_CIRCLE: u32 = 261;
+
 const GL_BLEND: c_uint = 0x0BE2;
 const GL_COLOR_ARRAY: c_uint = 0x8076;
 const GL_COLOR_BUFFER_BIT: c_uint = 0x0000_4000;
@@ -363,13 +373,13 @@ fn main() {
         io.config_flags |= ConfigFlags::IS_TOUCH_SCREEN;
         io.backend_flags |= BackendFlags::HAS_GAMEPAD;
 
-        io.key_map[Key::UpArrow as usize] = SCE_CTRL_UP;
-        io.key_map[Key::DownArrow as usize] = SCE_CTRL_DOWN;
-        io.key_map[Key::LeftArrow as usize] = SCE_CTRL_LEFT;
-        io.key_map[Key::RightArrow as usize] = SCE_CTRL_RIGHT;
-        io.key_map[Key::Enter as usize] = SCE_CTRL_CROSS;
-        io.key_map[Key::Escape as usize] = SCE_CTRL_CIRCLE;
-        io.key_map[Key::Space as usize] = SCE_CTRL_CROSS;
+        io.key_map[Key::UpArrow as usize] = VITA_IMGUI_KEY_UP;
+        io.key_map[Key::DownArrow as usize] = VITA_IMGUI_KEY_DOWN;
+        io.key_map[Key::LeftArrow as usize] = VITA_IMGUI_KEY_LEFT;
+        io.key_map[Key::RightArrow as usize] = VITA_IMGUI_KEY_RIGHT;
+        io.key_map[Key::Enter as usize] = VITA_IMGUI_KEY_CROSS;
+        io.key_map[Key::Escape as usize] = VITA_IMGUI_KEY_CIRCLE;
+        io.key_map[Key::Space as usize] = VITA_IMGUI_KEY_CROSS;
     }
 
     let mut renderer = VitaGlImguiRenderer::new(&mut imgui);
@@ -537,12 +547,12 @@ fn apply_controller_to_imgui(io: &mut imgui::Io, ctrl: &SceCtrlData) {
     for key in io.keys_down.iter_mut() {
         *key = false;
     }
-    set_key(io, SCE_CTRL_UP, pressed(ctrl, SCE_CTRL_UP));
-    set_key(io, SCE_CTRL_DOWN, pressed(ctrl, SCE_CTRL_DOWN));
-    set_key(io, SCE_CTRL_LEFT, pressed(ctrl, SCE_CTRL_LEFT));
-    set_key(io, SCE_CTRL_RIGHT, pressed(ctrl, SCE_CTRL_RIGHT));
-    set_key(io, SCE_CTRL_CROSS, pressed(ctrl, SCE_CTRL_CROSS));
-    set_key(io, SCE_CTRL_CIRCLE, pressed(ctrl, SCE_CTRL_CIRCLE));
+    set_key(io, VITA_IMGUI_KEY_UP, pressed(ctrl, SCE_CTRL_UP));
+    set_key(io, VITA_IMGUI_KEY_DOWN, pressed(ctrl, SCE_CTRL_DOWN));
+    set_key(io, VITA_IMGUI_KEY_LEFT, pressed(ctrl, SCE_CTRL_LEFT));
+    set_key(io, VITA_IMGUI_KEY_RIGHT, pressed(ctrl, SCE_CTRL_RIGHT));
+    set_key(io, VITA_IMGUI_KEY_CROSS, pressed(ctrl, SCE_CTRL_CROSS));
+    set_key(io, VITA_IMGUI_KEY_CIRCLE, pressed(ctrl, SCE_CTRL_CIRCLE));
 
     for input in NavInput::VARIANTS {
         io.nav_inputs[input as usize] = 0.0;
