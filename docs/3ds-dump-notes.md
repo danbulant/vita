@@ -10,6 +10,8 @@ The local `3ds_dump` directory contains a New3DS NAND image and GodMode9 essenti
 
 Treat `QJF11332355_essential_00.exefs` and files extracted from it as console-unique secret material. Do not paste OTP, movable, friend seed, NAND CID, SecureInfo, or hardware-calibration bytes into notes or commits.
 
+The 3DS Hacks Guide says `essential.exefs` can be used to recover data in the event of hardware failure. That is true for console/data recovery workflows because it contains console-unique material, but it is not the same as having every key input needed by PC-side NAND tools. `essential.exefs` does not include `boot9.bin`/`boot9_prot.bin`; those are dumped separately by boot9strap/GodMode9 key combos and provide the retail key material that tools such as `ninfs` need to derive NAND keys.
+
 ## Extracted Outputs
 
 Generated outputs were written under ignored `3ds_dump` paths:
@@ -50,9 +52,9 @@ This matches the 3dbrew New3DS NAND layout: TWL region first, then AGB save, two
 
 ## Next Extraction Step
 
-The current blocker is NAND decryption, not partition discovery. The flake now includes general support tools (`ctrtool`, `fuse3`, `mtools`, `sleuthkit`, Python crypto/FUSE libraries, `pip`), but nixpkgs did not contain `ninfs`/`fuse-3ds` or `3dstool` directly.
+The current blocker is NAND decryption, not partition discovery. The flake now includes general support tools (`ctrtool`, `fuse`, `fuse3`, `mtools`, `sleuthkit`, Python crypto/FUSE libraries, `pip`) and a flake-local `ninfs` v1.7b2 package because nixpkgs did not contain `ninfs`/`fuse-3ds` or `3dstool` directly.
 
-`ninfs` also requires the 3DS ARM9 boot ROM for 3DS mounts. It checks `--boot9`, `BOOT9_PATH`, `~/.3ds/boot9.bin`, and `~/3ds/boot9.bin`. Either `boot9.bin` or `boot9_prot.bin` can be used. The current dump set includes `otp.bin` and `nand_cid.bin`, but no Boot9 file was found or generated in this pass.
+`ninfs` also requires the 3DS ARM9 boot ROM for 3DS mounts. It checks `--boot9`, `BOOT9_PATH`, `~/.3ds/boot9.bin`, `~/.3ds/boot9_prot.bin`, `~/3ds/boot9.bin`, and `~/3ds/boot9_prot.bin`. Either `boot9.bin` or `boot9_prot.bin` can be used. The current dump set includes `otp.bin` and `nand_cid.bin`, but no Boot9 file was found or generated in this pass. Running `mount_nandctr --otp 3ds_dump/extracted/essential_exefs/otp.bin --cid 3ds_dump/extracted/essential_exefs/nand_cid.bin -r -f 3ds_dump/250102_QJF11332355_sysnand_00.bin 3ds_dump/mount` currently stops at `Bootrom could not be found`.
 
 The practical next step is to run `ninfs` or equivalent 3DS NAND tooling against:
 
