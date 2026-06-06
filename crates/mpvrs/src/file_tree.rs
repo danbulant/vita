@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use imgui::{Condition, Ui};
 
+use crate::audio::is_supported_audio_file;
 use crate::rendering::{SCREEN_H, SCREEN_W};
 
 const ROOT_PATH: &str = "ux0:/";
@@ -22,6 +23,11 @@ pub struct FileTreeView {
     status: String,
     last_refresh: Instant,
     focus_selected: bool,
+}
+
+#[derive(Clone, Debug)]
+pub enum FileTreeAction {
+    OpenAudio(String),
 }
 
 impl FileTreeView {
@@ -56,6 +62,10 @@ impl FileTreeView {
         self.last_refresh = Instant::now();
     }
 
+    pub fn set_status(&mut self, status: String) {
+        self.status = status;
+    }
+
     pub fn go_up(&mut self) {
         if self.current_dir == ROOT_PATH {
             self.status = format!("Already at {ROOT_PATH}");
@@ -66,7 +76,9 @@ impl FileTreeView {
         self.refresh();
     }
 
-    pub fn draw(&mut self, ui: &Ui) {
+    pub fn draw(&mut self, ui: &Ui) -> Option<FileTreeAction> {
+        let mut action = None;
+
         ui.window("File browser")
             .position([0.0, 0.0], Condition::Always)
             .size([SCREEN_W as f32, SCREEN_H as f32], Condition::Always)
@@ -115,26 +127,37 @@ impl FileTreeView {
                         }
 
                         if let Some(idx) = activated {
-                            self.activate_entry(idx);
+                            action = self.activate_entry(idx);
                         }
                     });
 
                 ui.separator();
-                ui.text("Cross: open/select  Circle: up  Triangle: refresh  Select: quit");
+                ui.text("Cross: open/play  Circle: up  Triangle: refresh  Select: quit");
+                if !self.status.is_empty() {
+                    ui.text(&self.status);
+                }
             });
+
+        action
     }
 
-    fn activate_entry(&mut self, idx: usize) {
+    fn activate_entry(&mut self, idx: usize) -> Option<FileTreeAction> {
         let Some(entry) = self.entries.get(idx).cloned() else {
-            return;
+            return None;
         };
 
         if entry.is_dir {
             self.current_dir = ensure_trailing_slash(&entry.path);
             self.refresh();
+            None
+        } else if is_supported_audio_file(&entry.path) {
+            self.selected = Some(idx);
+            self.status = format!("Playing: {}", entry.path);
+            Some(FileTreeAction::OpenAudio(entry.path))
         } else {
             self.selected = Some(idx);
-            self.status = format!("Selected file: {}", entry.path);
+            self.status = format!("Unsupported file: {}", entry.path);
+            None
         }
     }
 }

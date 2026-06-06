@@ -9,6 +9,7 @@ extern "C" {}
 #[no_mangle]
 pub static mut _newlib_heap_size_user: i32 = 64 * 1024 * 1024;
 
+mod audio;
 mod file_tree;
 mod rendering;
 
@@ -17,7 +18,8 @@ use std::panic;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use file_tree::FileTreeView;
+use audio::AudioPlayer;
+use file_tree::{FileTreeAction, FileTreeView};
 use imgui::{BackendFlags, ConfigFlags, Key, NavInput, Ui};
 use rendering::{clear_screen, init_vitagl, present, VitaGlImguiRenderer, SCREEN_H, SCREEN_W};
 use vitasdk_sys::{
@@ -45,6 +47,95 @@ struct AppState {
 
 enum Page {
     FileTree(FileTreeView),
+    Player(PlayerView),
+}
+
+struct PlayerView {
+    browser: FileTreeView,
+    player: AudioPlayer,
+    error: Option<String>,
+}
+
+impl PlayerView {
+    fn open(browser: FileTreeView, path: String) -> Result<Self, (FileTreeView, String)> {
+        match AudioPlayer::open(path) {
+            Ok(player) => Ok(Self {
+                browser,
+                player,
+                error: None,
+            }),
+            Err(err) => Err((browser, err)),
+        }
+    }
+
+    fn draw(&mut self, ui: &Ui) {
+        let snapshot = self.player.snapshot();
+
+        ui.window("Now playing")
+            .position([0.0, 0.0], imgui::Condition::Always)
+            .size([SCREEN_W as f32, SCREEN_H as f32], imgui::Condition::Always)
+            .movable(false)
+            .resizable(false)
+            .collapsible(false)
+            .build(|| {
+                ui.text("Now playing");
+                ui.separator();
+                ui.text(&snapshot.name);
+                ui.text(&snapshot.path);
+                ui.spacing();
+
+                let mut progress = if let Some(duration) = snapshot.duration_seconds {
+                    if duration > 0.0 {
+                        (snapshot.position_seconds / duration).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    }
+                } else {
+                    0.0
+                };
+
+                let label = if let Some(duration) = snapshot.duration_seconds {
+                    format!(
+                        "{} / {}",
+                        format_time(snapshot.position_seconds),
+                        format_time(duration)
+                    )
+                } else {
+                    format!("{} / --:--", format_time(snapshot.position_seconds))
+                };
+
+                if snapshot.duration_seconds.is_some() {
+                    if ui.slider("##seek", 0.0_f32, 1.0_f32, &mut progress) {
+                        self.player.seek_percent(progress);
+                    }
+                } else {
+                    imgui::ProgressBar::new(0.0).overlay_text(&label).build(ui);
+                }
+                ui.text(label);
+
+                ui.spacing();
+                let button = if snapshot.is_playing { "Pause" } else { "Play" };
+                if ui.button(button) {
+                    self.player.toggle_play_pause();
+                }
+
+                if !snapshot.status.is_empty() {
+                    ui.same_line();
+                    ui.text(snapshot.status);
+                }
+                if let Some(error) = &self.error {
+                    ui.text(format!("Error: {error}"));
+                }
+
+                ui.separator();
+                ui.text("Cross: play/pause/seek  Circle: file browser  Select: quit");
+            });
+    }
+}
+
+fn format_time(seconds: f32) -> String {
+    let total = seconds.max(0.0) as u32;
+    format!("{}:{:02}", total / 60, total % 60)
 }
 
 impl AppState {
@@ -57,18 +148,47 @@ impl AppState {
     fn refresh(&mut self) {
         match &mut self.page {
             Page::FileTree(page) => page.refresh(),
+            Page::Player(page) => page.browser.refresh(),
         }
     }
 
     fn back(&mut self) {
         match &mut self.page {
             Page::FileTree(page) => page.go_up(),
+            Page::Player(_) => {
+                let Page::Player(page) =
+                    std::mem::replace(&mut self.page, Page::FileTree(FileTreeView::new()))
+                else {
+                    unreachable!();
+                };
+                self.page = Page::FileTree(page.browser);
+            }
         }
     }
 
     fn draw(&mut self, ui: &Ui) {
-        match &mut self.page {
+        let action = match &mut self.page {
             Page::FileTree(page) => page.draw(ui),
+            Page::Player(page) => {
+                page.draw(ui);
+                None
+            }
+        };
+
+        if let Some(FileTreeAction::OpenAudio(path)) = action {
+            let Page::FileTree(browser) =
+                std::mem::replace(&mut self.page, Page::FileTree(FileTreeView::new()))
+            else {
+                unreachable!();
+            };
+
+            match PlayerView::open(browser, path) {
+                Ok(player) => self.page = Page::Player(player),
+                Err((mut browser, err)) => {
+                    browser.set_status(format!("Failed to open audio: {err}"));
+                    self.page = Page::FileTree(browser);
+                }
+            }
         }
     }
 }
