@@ -70,7 +70,6 @@ const GL_TEXTURE_MAG_FILTER: c_uint = 0x2800;
 const GL_TEXTURE_MIN_FILTER: c_uint = 0x2801;
 const GL_TRIANGLES: c_uint = 0x0004;
 const GL_UNSIGNED_BYTE: c_uint = 0x1401;
-const GL_UNSIGNED_SHORT: c_uint = 0x1403;
 const GL_VERTEX_ARRAY: c_uint = 0x8074;
 const GL_VIEWPORT: c_uint = 0x0BA2;
 
@@ -142,25 +141,11 @@ struct AppState {
     last_refresh: Instant,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-struct RenderStats {
-    fb_width: c_int,
-    fb_height: c_int,
-    draw_lists: usize,
-    commands: usize,
-    skipped_commands: usize,
-    elements: usize,
-    vertices: usize,
-    first_texture_id: usize,
-    first_clip_rect: Option<[f32; 4]>,
-}
-
 struct VitaGlImguiRenderer {
     font_texture: c_uint,
     vertices: Vec<[f32; 3]>,
     uvs: Vec<[f32; 2]>,
     colors: Vec<[u8; 4]>,
-    logged_first_geometry: bool,
 }
 
 impl VitaGlImguiRenderer {
@@ -169,11 +154,6 @@ impl VitaGlImguiRenderer {
             let texture = imgui.fonts().build_rgba32_texture();
             (texture.width, texture.height, texture.data.to_vec())
         };
-
-        eprintln!(
-            "mpvrs: built imgui font atlas: {width}x{height}, {} RGBA bytes",
-            pixels.len()
-        );
 
         let mut font_texture = 0;
         unsafe {
@@ -198,27 +178,20 @@ impl VitaGlImguiRenderer {
         }
 
         imgui.fonts().tex_id = TextureId::new(font_texture as usize);
-        eprintln!("mpvrs: uploaded font texture id={font_texture}");
 
         Self {
             font_texture,
             vertices: Vec::with_capacity(8192),
             uvs: Vec::with_capacity(8192),
             colors: Vec::with_capacity(8192),
-            logged_first_geometry: false,
         }
     }
 
-    fn render(&mut self, draw_data: &DrawData) -> RenderStats {
+    fn render(&mut self, draw_data: &DrawData) {
         let fb_width = (draw_data.display_size[0] * draw_data.framebuffer_scale[0]) as c_int;
         let fb_height = (draw_data.display_size[1] * draw_data.framebuffer_scale[1]) as c_int;
-        let mut stats = RenderStats {
-            fb_width,
-            fb_height,
-            ..RenderStats::default()
-        };
         if fb_width <= 0 || fb_height <= 0 {
-            return stats;
+            return;
         }
 
         let mut last_texture = 0;
@@ -261,22 +234,13 @@ impl VitaGlImguiRenderer {
         }
 
         for draw_list in draw_data.draw_lists() {
-            stats.draw_lists += 1;
             let idx_buffer = draw_list.idx_buffer();
             let vtx_buffer = draw_list.vtx_buffer();
-            stats.vertices += vtx_buffer.len();
 
             for command in draw_list.commands() {
                 let DrawCmd::Elements { count, cmd_params } = command else {
-                    stats.skipped_commands += 1;
                     continue;
                 };
-                stats.commands += 1;
-                stats.elements += count;
-                if stats.first_texture_id == 0 {
-                    stats.first_texture_id = cmd_params.texture_id.id();
-                    stats.first_clip_rect = Some(cmd_params.clip_rect);
-                }
 
                 self.vertices.clear();
                 self.uvs.clear();
@@ -292,31 +256,6 @@ impl VitaGlImguiRenderer {
                     self.vertices.push([pos[0], pos[1], 0.0]);
                     self.uvs.push(uv);
                     self.colors.push(col);
-                }
-
-                if !self.logged_first_geometry {
-                    self.logged_first_geometry = true;
-                    let mut min = [f32::INFINITY; 2];
-                    let mut max = [f32::NEG_INFINITY; 2];
-                    for vertex in &self.vertices {
-                        min[0] = min[0].min(vertex[0]);
-                        min[1] = min[1].min(vertex[1]);
-                        max[0] = max[0].max(vertex[0]);
-                        max[1] = max[1].max(vertex[1]);
-                    }
-                    eprintln!(
-                        "mpvrs: first imgui draw cmd: count={count}, idx_offset={}, vtx_offset={}, idx_buffer={}, vtx_buffer={}, pos_min={min:?}, pos_max={max:?}",
-                        cmd_params.idx_offset,
-                        cmd_params.vtx_offset,
-                        idx_buffer.len(),
-                        vtx_buffer.len(),
-                    );
-                    for i in 0..self.vertices.len().min(6) {
-                        eprintln!(
-                            "mpvrs: first imgui vertex[{i}]: pos={:?}, uv={:?}, color_rgba={:?}",
-                            self.vertices[i], self.uvs[i], self.colors[i]
-                        );
-                    }
                 }
 
                 let clip = cmd_params.clip_rect;
@@ -359,8 +298,6 @@ impl VitaGlImguiRenderer {
                 last_scissor_box[3],
             );
         }
-
-        stats
     }
 }
 
@@ -387,17 +324,11 @@ impl AppState {
     fn refresh(&mut self) {
         match read_one_level(ROOT_PATH) {
             Ok(entries) => {
-                eprintln!(
-                    "mpvrs: read {ROOT_PATH}: {} entries; first={:?}",
-                    entries.len(),
-                    entries.first().map(|entry| (&entry.name, entry.is_dir))
-                );
                 self.entries = entries;
                 self.selected = self.selected.filter(|&idx| idx < self.entries.len());
                 self.status = format!("{} entries in {}", self.entries.len(), ROOT_PATH);
             }
             Err(err) => {
-                eprintln!("mpvrs: failed to read {ROOT_PATH}: {err}");
                 self.entries.clear();
                 self.selected = None;
                 self.status = format!("Failed to read {ROOT_PATH}: {err}");
@@ -433,7 +364,6 @@ fn main() {
 
     let mut imgui = imgui::Context::create();
     imgui.set_ini_filename(None);
-    eprintln!("mpvrs: imgui context created");
     {
         let io = imgui.io_mut();
         io.display_size = [SCREEN_W as f32, SCREEN_H as f32];
@@ -449,32 +379,14 @@ fn main() {
         io.key_map[Key::Enter as usize] = VITA_IMGUI_KEY_CROSS;
         io.key_map[Key::Escape as usize] = VITA_IMGUI_KEY_CIRCLE;
         io.key_map[Key::Space as usize] = VITA_IMGUI_KEY_CROSS;
-
-        eprintln!(
-            "mpvrs: imgui io initialized: display={:?}, keys_down={}, nav_inputs={}, key_map(up/down/left/right/enter/escape/space)={}/{}/{}/{}/{}/{}/{}",
-            io.display_size,
-            io.keys_down.len(),
-            io.nav_inputs.len(),
-            io.key_map[Key::UpArrow as usize],
-            io.key_map[Key::DownArrow as usize],
-            io.key_map[Key::LeftArrow as usize],
-            io.key_map[Key::RightArrow as usize],
-            io.key_map[Key::Enter as usize],
-            io.key_map[Key::Escape as usize],
-            io.key_map[Key::Space as usize],
-        );
     }
 
     let mut renderer = VitaGlImguiRenderer::new(&mut imgui);
 
     let mut app = AppState::new();
     let mut last_frame = Instant::now();
-    let mut frame_no: u64 = 0;
-    let mut last_buttons = 0;
-    let mut last_touch_down = false;
 
     loop {
-        frame_no += 1;
         let ctrl = read_ctrl();
         if pressed(&ctrl, SCE_CTRL_SELECT) {
             break;
@@ -483,20 +395,7 @@ fn main() {
             app.refresh();
         }
 
-        if ctrl.buttons != last_buttons {
-            eprintln!(
-                "mpvrs: frame {frame_no}: buttons changed {last_buttons:#x} -> {:#x}",
-                ctrl.buttons
-            );
-            last_buttons = ctrl.buttons;
-        }
-
         let touch = read_front_touch();
-        let touch_down = touch.is_some();
-        if touch_down != last_touch_down {
-            eprintln!("mpvrs: frame {frame_no}: touch_down={touch_down}, pos={touch:?}");
-            last_touch_down = touch_down;
-        }
 
         let now = Instant::now();
         let delta = now.saturating_duration_since(last_frame);
@@ -513,44 +412,13 @@ fn main() {
         let ui = imgui.frame();
         draw_ui(ui, &mut app);
 
-        if should_log_frame(frame_no) {
-            let io = imgui.io();
-            eprintln!(
-                "mpvrs: frame {frame_no}: before render dt={:.4}s, display={:?}, mouse_pos={:?}, mouse_down={:?}, want_mouse={}, want_keyboard={}, nav_active={}, entries={}, status={:?}",
-                delta.as_secs_f32(),
-                io.display_size,
-                io.mouse_pos,
-                io.mouse_down,
-                io.want_capture_mouse,
-                io.want_capture_keyboard,
-                io.nav_active,
-                app.entries.len(),
-                app.status,
-            );
-        }
-
         unsafe {
             glClearColor(0.05, 0.06, 0.08, 1.0);
             glClear(GL_COLOR_BUFFER_BIT);
         }
-        draw_debug_vgl_probe();
 
         let draw_data = imgui.render();
-        let stats = renderer.render(draw_data);
-        if should_log_frame(frame_no) {
-            eprintln!(
-                "mpvrs: frame {frame_no}: render stats: fb={}x{}, lists={}, cmds={}, skipped={}, elems={}, vtx={}, first_tex={}, first_clip={:?}",
-                stats.fb_width,
-                stats.fb_height,
-                stats.draw_lists,
-                stats.commands,
-                stats.skipped_commands,
-                stats.elements,
-                stats.vertices,
-                stats.first_texture_id,
-                stats.first_clip_rect,
-            );
-        }
+        renderer.render(draw_data);
 
         unsafe {
             vglSwapBuffers(0);
@@ -559,65 +427,6 @@ fn main() {
     }
 
     drop(renderer);
-}
-
-fn draw_debug_vgl_probe() {
-    let vertices: [[f32; 3]; 6] = [
-        [24.0, 24.0, 0.0],
-        [360.0, 24.0, 0.0],
-        [360.0, 120.0, 0.0],
-        [24.0, 24.0, 0.0],
-        [360.0, 120.0, 0.0],
-        [24.0, 120.0, 0.0],
-    ];
-    let colors: [[u8; 4]; 6] = [
-        [255, 0, 255, 255],
-        [0, 255, 255, 255],
-        [255, 255, 0, 255],
-        [255, 0, 255, 255],
-        [255, 255, 0, 255],
-        [255, 255, 255, 255],
-    ];
-    unsafe {
-        glDisable(GL_BLEND);
-        glDisable(GL_CULL_FACE);
-        glDisable(GL_DEPTH_TEST);
-        glDisable(GL_SCISSOR_TEST);
-        glDisable(GL_TEXTURE_2D);
-        glEnableClientState(GL_VERTEX_ARRAY);
-        glDisableClientState(GL_TEXTURE_COORD_ARRAY);
-        glEnableClientState(GL_COLOR_ARRAY);
-
-        glViewport(0, 0, SCREEN_W as c_int, SCREEN_H as c_int);
-        glMatrixMode(GL_PROJECTION);
-        glPushMatrix();
-        glLoadIdentity();
-        glOrtho(
-            0.0,
-            SCREEN_W as c_double,
-            SCREEN_H as c_double,
-            0.0,
-            0.0,
-            1.0,
-        );
-        glMatrixMode(GL_MODELVIEW);
-        glPushMatrix();
-        glLoadIdentity();
-
-        glVertexPointer(3, GL_FLOAT, 0, vertices.as_ptr().cast());
-        glColorPointer(4, GL_UNSIGNED_BYTE, 0, colors.as_ptr().cast());
-        glDrawArrays(GL_TRIANGLES, 0, vertices.len() as c_int);
-
-        glMatrixMode(GL_MODELVIEW);
-        glPopMatrix();
-        glMatrixMode(GL_PROJECTION);
-        glPopMatrix();
-        glEnable(GL_TEXTURE_2D);
-    }
-}
-
-fn should_log_frame(frame_no: u64) -> bool {
-    frame_no <= 10 || frame_no % 60 == 0
 }
 
 fn install_panic_hook() {
