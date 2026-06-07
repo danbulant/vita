@@ -6,6 +6,7 @@ use imgui::{Condition, Ui};
 
 use crate::plumbing::audio::{is_supported_audio_file, PlaybackMetadata, PlaybackSnapshot};
 use crate::plumbing::rendering::{SCREEN_H, SCREEN_W};
+use crate::queue::{QueueItem, QueueSource};
 use crate::ui::components::scrollable_list::ScrollableList;
 use crate::ui::{draw_bottom_nav, NavAction};
 
@@ -36,6 +37,8 @@ pub enum FileTreeAction {
     OpenAudio {
         path: String,
         metadata: Option<PlaybackMetadata>,
+        source: QueueSource,
+        queue: Vec<QueueItem>,
     },
 }
 
@@ -230,14 +233,27 @@ impl FileTreeView {
             self.selected = Some(idx);
             self.status = format!("Playing: {}", entry.path);
             Some(FileTreeAction::OpenAudio {
-                path: entry.path,
+                path: entry.path.clone(),
                 metadata: None,
+                source: QueueSource::Folder(self.current_dir.clone()),
+                queue: self.folder_queue(),
             })
         } else {
             self.selected = Some(idx);
             self.status = format!("Unsupported file: {}", entry.path);
             None
         }
+    }
+
+    fn folder_queue(&self) -> Vec<QueueItem> {
+        self.entries
+            .iter()
+            .filter(|entry| !entry.is_dir && is_supported_audio_file(&entry.path))
+            .map(|entry| QueueItem {
+                path: entry.path.clone(),
+                metadata: PlaybackMetadata::from_path(&entry.path),
+            })
+            .collect()
     }
 }
 

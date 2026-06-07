@@ -470,49 +470,6 @@ fn draw_cover_art_texture_or_fallback(
     }
 }
 
-pub fn draw_play_pause_icon(ui: &Ui, is_playing: bool, pos: [f32; 2], size: f32) {
-    let draw_list = ui.get_window_draw_list();
-    let color = [0.94, 0.96, 1.0, 1.0];
-    let accent = [0.30, 0.58, 0.95, 1.0];
-    let x = pos[0];
-    let y = pos[1];
-    let s = size;
-
-    draw_list
-        .add_circle([x + s * 0.5, y + s * 0.5], s * 0.46, accent)
-        .filled(true)
-        .build();
-
-    if is_playing {
-        draw_list
-            .add_rect(
-                [x + s * 0.34, y + s * 0.28],
-                [x + s * 0.44, y + s * 0.72],
-                color,
-            )
-            .filled(true)
-            .build();
-        draw_list
-            .add_rect(
-                [x + s * 0.56, y + s * 0.28],
-                [x + s * 0.66, y + s * 0.72],
-                color,
-            )
-            .filled(true)
-            .build();
-    } else {
-        draw_list
-            .add_triangle(
-                [x + s * 0.40, y + s * 0.28],
-                [x + s * 0.40, y + s * 0.72],
-                [x + s * 0.72, y + s * 0.50],
-                color,
-            )
-            .filled(true)
-            .build();
-    }
-}
-
 fn draw_cover_fallback(ui: &Ui, pos: [f32; 2], area: [f32; 2]) {
     let draw_list = ui.get_window_draw_list();
     let x = pos[0];

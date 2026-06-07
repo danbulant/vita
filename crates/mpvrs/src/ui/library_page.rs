@@ -6,6 +6,7 @@ use crate::library::db::normalize_root;
 use crate::library::{AlbumRow, ArtistRow, LibraryDb, RootRow, ScanProgress, Scanner, TrackRow};
 use crate::plumbing::audio::PlaybackMetadata;
 use crate::plumbing::rendering::{SCREEN_H, SCREEN_W};
+use crate::queue::{QueueItem, QueueSource};
 use crate::ui::components::cover_art::{draw_thumbnail_cover_art_at, CoverArtCache};
 use crate::ui::components::scrollable_list::ScrollableList;
 use crate::ui::file_tree::FileTreeView;
@@ -54,6 +55,8 @@ pub enum LibraryAction {
     OpenAudio {
         path: String,
         metadata: PlaybackMetadata,
+        source: QueueSource,
+        queue: Vec<QueueItem>,
     },
 }
 
@@ -70,6 +73,8 @@ enum PendingLibraryAction {
     OpenAudio {
         path: String,
         metadata: PlaybackMetadata,
+        source: QueueSource,
+        queue: Vec<QueueItem>,
     },
 }
 
@@ -238,11 +243,27 @@ impl LibraryView {
             LibraryPage::Roots(roots) => draw_roots(ui, disable_hover, roots),
             LibraryPage::Artists(artists) => draw_artists(ui, disable_hover, artists),
             LibraryPage::Albums(albums) => draw_albums(ui, disable_hover, albums, cover_cache),
-            LibraryPage::Tracks(tracks)
-            | LibraryPage::ArtistTracks { tracks, .. }
-            | LibraryPage::AlbumTracks { tracks, .. } => {
-                draw_tracks(ui, disable_hover, tracks, cover_cache)
-            }
+            LibraryPage::Tracks(tracks) => draw_tracks(
+                ui,
+                disable_hover,
+                QueueSource::AllTracks,
+                tracks,
+                cover_cache,
+            ),
+            LibraryPage::ArtistTracks { artist, tracks } => draw_tracks(
+                ui,
+                disable_hover,
+                QueueSource::Artist(artist.clone()),
+                tracks,
+                cover_cache,
+            ),
+            LibraryPage::AlbumTracks { album, tracks } => draw_tracks(
+                ui,
+                disable_hover,
+                QueueSource::Album(album.clone()),
+                tracks,
+                cover_cache,
+            ),
         };
 
         match pending {
@@ -253,8 +274,18 @@ impl LibraryView {
             Some(PendingLibraryAction::LoadAlbumTracks { id, title }) => {
                 self.load_album_tracks(id, title)
             }
-            Some(PendingLibraryAction::OpenAudio { path, metadata }) => {
-                return Some(LibraryAction::OpenAudio { path, metadata });
+            Some(PendingLibraryAction::OpenAudio {
+                path,
+                metadata,
+                source,
+                queue,
+            }) => {
+                return Some(LibraryAction::OpenAudio {
+                    path,
+                    metadata,
+                    source,
+                    queue,
+                });
             }
             None => {}
         }
@@ -535,6 +566,7 @@ fn draw_albums(
 fn draw_tracks(
     ui: &Ui,
     disable_hover: bool,
+    source: QueueSource,
     tracks: &[TrackRow],
     cover_cache: &mut CoverArtCache,
 ) -> Option<PendingLibraryAction> {
@@ -549,12 +581,9 @@ fn draw_tracks(
         if track_row(ui, track, disable_hover, cover_cache) {
             return Some(PendingLibraryAction::OpenAudio {
                 path: track.path.clone(),
-                metadata: PlaybackMetadata::new(
-                    track.title.clone(),
-                    Some(track.track_artist.clone()),
-                    Some(track.album.clone()),
-                    track.art_path.clone(),
-                ),
+                metadata: playback_metadata_from_track(track),
+                source: source.clone(),
+                queue: tracks.iter().map(queue_item_from_track).collect(),
             });
         }
     }
@@ -564,6 +593,22 @@ fn draw_tracks(
     }
 
     None
+}
+
+fn queue_item_from_track(track: &TrackRow) -> QueueItem {
+    QueueItem {
+        path: track.path.clone(),
+        metadata: playback_metadata_from_track(track),
+    }
+}
+
+fn playback_metadata_from_track(track: &TrackRow) -> PlaybackMetadata {
+    PlaybackMetadata::new(
+        track.title.clone(),
+        Some(track.track_artist.clone()),
+        Some(track.album.clone()),
+        track.art_path.clone(),
+    )
 }
 
 fn visible_row_range(

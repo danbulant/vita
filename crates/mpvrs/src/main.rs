@@ -11,6 +11,7 @@ pub static mut _newlib_heap_size_user: i32 = 64 * 1024 * 1024;
 
 mod library;
 mod plumbing;
+mod queue;
 mod ui;
 
 use std::backtrace::Backtrace;
@@ -26,10 +27,11 @@ use plumbing::input::{self, Button};
 use plumbing::rendering::{
     clear_screen, init_vitagl, present, VitaGlImguiRenderer, SCREEN_H, SCREEN_W,
 };
+use queue::{PlaybackQueue, QueueItem, QueueSource, RepeatMode};
 use ui::components::cover_art::CoverArtCache;
 use ui::file_tree::{FileTreeAction, FileTreeView};
 use ui::library_page::{LibraryAction, LibraryView};
-use ui::player_page::PlayerView;
+use ui::player_page::{PlayerAction, PlayerQueueInfo, PlayerView};
 use ui::NavAction;
 
 const SEEK_STEP_SECONDS: f32 = 10.0;
@@ -38,6 +40,9 @@ struct AppState {
     page: Page,
     history: Vec<Page>,
     player: Option<AudioPlayer>,
+    queue: Option<PlaybackQueue>,
+    shuffle_enabled: bool,
+    repeat_mode: RepeatMode,
     cover_cache: CoverArtCache,
 }
 
@@ -53,6 +58,9 @@ impl AppState {
             page: Page::Library(LibraryView::new(FileTreeView::new(), false)),
             history: Vec::new(),
             player: None,
+            queue: None,
+            shuffle_enabled: false,
+            repeat_mode: RepeatMode::Off,
             cover_cache: CoverArtCache::new(),
         }
     }
@@ -169,7 +177,136 @@ impl AppState {
         }
     }
 
+    fn queue_info(&self) -> Option<PlayerQueueInfo> {
+        self.queue.as_ref().map(|queue| PlayerQueueInfo {
+            shuffle_enabled: queue.shuffle_enabled(),
+            repeat_mode: queue.repeat_mode(),
+        })
+    }
+
+    fn start_queue(
+        &mut self,
+        source: QueueSource,
+        mut items: Vec<QueueItem>,
+        start_path: String,
+        metadata: PlaybackMetadata,
+    ) -> Result<(), String> {
+        if items.is_empty() {
+            items.push(QueueItem {
+                path: start_path.clone(),
+                metadata: metadata.clone(),
+            });
+        }
+        if let Some(item) = items.iter_mut().find(|item| item.path == start_path) {
+            item.metadata = metadata;
+        }
+        let queue = PlaybackQueue::new(
+            source,
+            items,
+            &start_path,
+            self.shuffle_enabled,
+            self.repeat_mode,
+        );
+        self.queue = Some(queue);
+        self.open_current_queue_item()
+    }
+
+    fn open_current_queue_item(&mut self) -> Result<(), String> {
+        let Some(item) = self
+            .queue
+            .as_ref()
+            .and_then(|queue| queue.current())
+            .cloned()
+        else {
+            self.player = None;
+            return Err("Queue is empty".to_owned());
+        };
+        self.player = None;
+        match AudioPlayer::open_with_metadata(item.path, item.metadata) {
+            Ok(player) => {
+                self.player = Some(player);
+                Ok(())
+            }
+            Err(err) => {
+                self.player = None;
+                Err(err)
+            }
+        }
+    }
+
+    fn handle_finished_playback(&mut self) {
+        let finished = self
+            .player
+            .as_ref()
+            .map(|player| player.snapshot().status == "Finished")
+            .unwrap_or(false);
+        if !finished {
+            return;
+        }
+
+        let has_next = self
+            .queue
+            .as_mut()
+            .and_then(|queue| queue.advance_after_finish())
+            .is_some();
+        if has_next {
+            if let Err(err) = self.open_current_queue_item() {
+                self.set_current_page_status(format!("Failed to open queued audio: {err}"));
+            }
+        }
+    }
+
+    fn handle_player_action(&mut self, action: PlayerAction) {
+        match action {
+            PlayerAction::Previous => {
+                if self
+                    .queue
+                    .as_mut()
+                    .and_then(|queue| queue.previous_manual())
+                    .is_some()
+                {
+                    if let Err(err) = self.open_current_queue_item() {
+                        self.set_current_page_status(format!("Failed to open queued audio: {err}"));
+                    }
+                }
+            }
+            PlayerAction::Next => {
+                if self
+                    .queue
+                    .as_mut()
+                    .and_then(|queue| queue.next_manual())
+                    .is_some()
+                {
+                    if let Err(err) = self.open_current_queue_item() {
+                        self.set_current_page_status(format!("Failed to open queued audio: {err}"));
+                    }
+                }
+            }
+            PlayerAction::ToggleShuffle => {
+                self.shuffle_enabled = !self.shuffle_enabled;
+                if let Some(queue) = &mut self.queue {
+                    queue.set_shuffle_enabled(self.shuffle_enabled);
+                }
+            }
+            PlayerAction::CycleRepeat => {
+                self.repeat_mode = self.repeat_mode.next();
+                if let Some(queue) = &mut self.queue {
+                    queue.cycle_repeat();
+                }
+            }
+        }
+    }
+
+    fn set_current_page_status(&mut self, status: String) {
+        match &mut self.page {
+            Page::FileTree(page) => page.set_status(status),
+            Page::Library(page) => page.set_status(status),
+            Page::Player(_) => {}
+        }
+    }
+
     fn draw(&mut self, ui: &Ui, controller_navigation_active: bool) {
+        self.handle_finished_playback();
         let playback = self.player.as_ref().map(|player| player.snapshot());
         self.cover_cache.set_playback_active(
             playback
@@ -183,15 +320,19 @@ impl AppState {
         let show_back = self.can_go_back();
         let show_player = self.player.is_some() && !matches!(self.page, Page::Player(_));
         let mut browse_files = false;
-        let (action, nav_action) = match &mut self.page {
-            Page::FileTree(page) => page.draw(
-                ui,
-                playback.as_ref(),
-                controller_navigation_active,
-                window_title,
-                show_back,
-                show_player,
-            ),
+        let queue_info = self.queue_info();
+        let (action, nav_action, player_action) = match &mut self.page {
+            Page::FileTree(page) => {
+                let (action, nav_action) = page.draw(
+                    ui,
+                    playback.as_ref(),
+                    controller_navigation_active,
+                    window_title,
+                    show_back,
+                    show_player,
+                );
+                (action, nav_action, None)
+            }
             Page::Library(page) => {
                 let (library_action, nav_action) = page.draw(
                     ui,
@@ -205,30 +346,41 @@ impl AppState {
                         browse_files = true;
                         None
                     }
-                    Some(LibraryAction::OpenAudio { path, metadata }) => {
-                        Some(FileTreeAction::OpenAudio {
-                            path,
-                            metadata: Some(metadata),
-                        })
-                    }
+                    Some(LibraryAction::OpenAudio {
+                        path,
+                        metadata,
+                        source,
+                        queue,
+                    }) => Some(FileTreeAction::OpenAudio {
+                        path,
+                        metadata: Some(metadata),
+                        source,
+                        queue,
+                    }),
                     None => None,
                 };
-                (action, nav_action)
+                (action, nav_action, None)
             }
             Page::Player(page) => {
-                let nav_action = page.draw(
+                let (nav_action, player_action) = page.draw(
                     ui,
                     self.player.as_ref(),
                     window_title,
                     show_back,
                     &mut self.cover_cache,
+                    queue_info,
                 );
-                (None, nav_action)
+                (None, nav_action, player_action)
             }
         };
 
         if browse_files {
             self.open_file_browser();
+            return;
+        }
+
+        if let Some(player_action) = player_action {
+            self.handle_player_action(player_action);
             return;
         }
 
@@ -242,16 +394,21 @@ impl AppState {
             return;
         }
 
-        if let Some(FileTreeAction::OpenAudio { path, metadata }) = action {
+        if let Some(FileTreeAction::OpenAudio {
+            path,
+            metadata,
+            source,
+            queue,
+        }) = action
+        {
             let mut previous_page =
                 std::mem::replace(&mut self.page, Page::Player(PlayerView::new()));
 
             self.player = None;
             let metadata = metadata.unwrap_or_else(|| playback_metadata_for_path(&path));
 
-            match AudioPlayer::open_with_metadata(path, metadata) {
-                Ok(player) => {
-                    self.player = Some(player);
+            match self.start_queue(source, queue, path, metadata) {
+                Ok(()) => {
                     self.history.push(previous_page);
                 }
                 Err(err) => {
