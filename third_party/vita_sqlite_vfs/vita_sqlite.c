@@ -1,6 +1,5 @@
 #include "sqlite3.h"
 
-#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,34 +14,9 @@
 #define SCE_SEEK_SET 0
 #endif
 
-#ifndef SCE_O_APPEND
-#define SCE_O_APPEND 0x0008
-#endif
-
 #ifndef SCE_KERNEL_MUTEX_ATTR_RECURSIVE
 #define SCE_KERNEL_MUTEX_ATTR_RECURSIVE 0x00000002U
 #endif
-
-static void vita_log(const char *fmt, ...) {
-    char message[256];
-    va_list args;
-    va_start(args, fmt);
-    int len = vsnprintf(message, sizeof(message), fmt, args);
-    va_end(args);
-
-    if (len <= 0) {
-        return;
-    }
-    if (len > (int)sizeof(message)) {
-        len = sizeof(message);
-    }
-
-    SceUID fd = sceIoOpen("ux0:data/mpvrs/sqlite-vfs.log", SCE_O_WRONLY | SCE_O_CREAT | SCE_O_APPEND, 0777);
-    if (fd >= 0) {
-        sceIoWrite(fd, message, len);
-        sceIoClose(fd);
-    }
-}
 
 typedef struct VitaFile {
     sqlite3_file base;
@@ -269,7 +243,6 @@ static int vita_xDeviceCharacteristics(sqlite3_file *pFile) {
 
 static int vita_xOpen(sqlite3_vfs *vfs, const char *name, sqlite3_file *file, int flags, int *outFlags) {
     (void)vfs;
-    vita_log("xOpen name=%s flags=0x%x\n", name ? name : "(null)", flags);
     static const sqlite3_io_methods vitaio = {
         1,
         vita_xClose,
@@ -312,11 +285,9 @@ static int vita_xOpen(sqlite3_vfs *vfs, const char *name, sqlite3_file *file, in
     }
 
     p->fd = sceIoOpen(name, oflags, 0777);
-    vita_log("xOpen sceIoOpen name=%s oflags=0x%x fd=0x%x\n", name, oflags, p->fd);
     if (p->fd < 0 && (flags & SQLITE_OPEN_READWRITE)) {
         int roFlags = (oflags & ~(SCE_O_RDWR | SCE_O_CREAT | SCE_O_EXCL)) | SCE_O_RDONLY;
         p->fd = sceIoOpen(name, roFlags, 0);
-        vita_log("xOpen readonly fallback name=%s roFlags=0x%x fd=0x%x\n", name, roFlags, p->fd);
         if (p->fd >= 0 && outFlags) {
             *outFlags = SQLITE_OPEN_READONLY;
         }
@@ -335,7 +306,6 @@ static int vita_xOpen(sqlite3_vfs *vfs, const char *name, sqlite3_file *file, in
 
 static int vita_xDelete(sqlite3_vfs *vfs, const char *name, int syncDir) {
     (void)vfs;
-    vita_log("xDelete name=%s\n", name ? name : "(null)");
     (void)syncDir;
     int ret = sceIoRemove(name);
     return ret < 0 ? SQLITE_IOERR_DELETE : SQLITE_OK;
@@ -343,7 +313,6 @@ static int vita_xDelete(sqlite3_vfs *vfs, const char *name, int syncDir) {
 
 static int vita_xAccess(sqlite3_vfs *vfs, const char *name, int flags, int *pResOut) {
     (void)vfs;
-    vita_log("xAccess name=%s flags=%d\n", name ? name : "(null)", flags);
     (void)flags;
     SceIoStat stat;
     memset(&stat, 0, sizeof(stat));
@@ -353,7 +322,6 @@ static int vita_xAccess(sqlite3_vfs *vfs, const char *name, int flags, int *pRes
 
 static int vita_xFullPathname(sqlite3_vfs *vfs, const char *zName, int nOut, char *zOut) {
     (void)vfs;
-    vita_log("xFullPathname name=%s nOut=%d\n", zName ? zName : "(null)", nOut);
     sqlite3_snprintf(nOut, zOut, "%s", zName);
     return SQLITE_OK;
 }
@@ -385,7 +353,6 @@ static void vita_xDlClose(sqlite3_vfs *vfs, void *p) {
 
 static int vita_xRandomness(sqlite3_vfs *vfs, int nByte, char *zOut) {
     (void)vfs;
-    vita_log("xRandomness nByte=%d\n", nByte);
     SceDateTime now;
     SceRtcTick tick;
     memset(&now, 0, sizeof(now));
@@ -449,12 +416,10 @@ static sqlite3_vfs vita_vfs = {
 };
 
 int mpvrs_sqlite_configure_mutex(void) {
-    vita_log("configure mutex\n");
     return sqlite3_config(SQLITE_CONFIG_MUTEX, &vita_mutex_methods);
 }
 
 int sqlite3_os_init(void) {
-    vita_log("sqlite3_os_init register vita vfs\n");
     sqlite3_vfs_register(&vita_vfs, 1);
     return SQLITE_OK;
 }

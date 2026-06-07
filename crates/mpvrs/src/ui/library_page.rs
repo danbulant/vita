@@ -2,6 +2,7 @@ use std::thread::{self, JoinHandle};
 
 use imgui::{Condition, Ui};
 
+use crate::library::db::normalize_root;
 use crate::library::{AlbumRow, ArtistRow, LibraryDb, RootRow, ScanProgress, Scanner, TrackRow};
 use crate::plumbing::rendering::{SCREEN_H, SCREEN_W};
 use crate::ui::components::scrollable_list::ScrollableList;
@@ -154,18 +155,7 @@ impl LibraryView {
             self.load_roots();
         }
         ui.separator();
-        if row(
-            ui,
-            &format!("Add current folder as root: {}", self.current_folder),
-            disable_hover,
-        ) {
-            self.add_current_folder();
-        }
-        if row(
-            ui,
-            &format!("Reindex current folder: {}", self.current_folder),
-            disable_hover,
-        ) {
+        if row(ui, &self.current_folder_action_label(), disable_hover) {
             self.start_scan(self.current_folder.clone());
         }
         None
@@ -296,14 +286,29 @@ impl LibraryView {
         }
     }
 
-    fn add_current_folder(&mut self) {
+    fn current_folder_action_label(&mut self) -> String {
+        let prefix = if self.current_folder_is_enabled_root() {
+            "Reindex current folder"
+        } else {
+            "Add and index current folder"
+        };
+        format!("{prefix}: {}", self.current_folder)
+    }
+
+    fn current_folder_is_enabled_root(&mut self) -> bool {
         self.ensure_db();
         let Some(db) = &self.db else {
-            return;
+            return false;
         };
-        match db.add_root(&self.current_folder) {
-            Ok(()) => self.status = format!("Added root: {}", self.current_folder),
-            Err(err) => self.status = format!("Failed to add root: {err}"),
+        let current_folder = normalize_root(&self.current_folder);
+        match db.roots() {
+            Ok(roots) => roots
+                .iter()
+                .any(|root| root.enabled && root.path == current_folder),
+            Err(err) => {
+                self.status = format!("Failed to load roots: {err}");
+                false
+            }
         }
     }
 

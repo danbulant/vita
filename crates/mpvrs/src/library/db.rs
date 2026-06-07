@@ -54,7 +54,6 @@ impl LibraryDb {
     pub fn open_default() -> Result<Self, String> {
         ensure_data_dirs()?;
         configure_sqlite_threading();
-        probe_std_write();
         let conn = open_sqlite_with_diagnostics()?;
         let db = Self { conn };
         db.init()?;
@@ -562,39 +561,14 @@ fn configure_sqlite_threading() {
         #[cfg(not(target_os = "vita"))]
         let mutex_rc = 0;
 
-        let threadsafe = rusqlite::ffi::sqlite3_threadsafe();
         let serialized_rc = rusqlite::ffi::sqlite3_config(rusqlite::ffi::SQLITE_CONFIG_SERIALIZED);
-        log::append(format!(
-            "library: sqlite threading: sqlite3_threadsafe={threadsafe}, config_mutex_rc={mutex_rc}, config_serialized_rc={serialized_rc}"
-        ));
-    });
-}
-
-fn probe_std_write() {
-    match std::env::current_dir() {
-        Ok(dir) => log::append(format!("library: current_dir: {}", dir.display())),
-        Err(err) => log::append(format!("library: current_dir failed: {err}")),
-    }
-
-    let probes = [format!("{DATA_DIR}/write-probe.tmp")];
-
-    for probe_path in probes {
-        match std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&probe_path)
-            .and_then(|mut file| std::io::Write::write_all(&mut file, b"mpvrs write probe\n"))
-        {
-            Ok(()) => {
-                log::append(format!("library: std write probe ok: {probe_path}"));
-                let _ = fs::remove_file(&probe_path);
-            }
-            Err(err) => log::append(format!(
-                "library: std write probe failed: {probe_path}: {err:?}"
-            )),
+        if mutex_rc != rusqlite::ffi::SQLITE_OK || serialized_rc != rusqlite::ffi::SQLITE_OK {
+            let threadsafe = rusqlite::ffi::sqlite3_threadsafe();
+            log::append(format!(
+                "library: sqlite threading configuration failed: sqlite3_threadsafe={threadsafe}, config_mutex_rc={mutex_rc}, config_serialized_rc={serialized_rc}"
+            ));
         }
-    }
+    });
 }
 
 fn open_sqlite_with_diagnostics() -> Result<Connection, String> {
