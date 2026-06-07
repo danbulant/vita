@@ -3,9 +3,13 @@ name = "mpvrs"
 version = "0.1.0"
 edition = "2021"
 
+[build-dependencies]
+cc = "1"
+
 [dependencies]
 symphonia = { version = "0.5", default-features = false, features = ["all"] }
 imgui = "=0.12.0"
+rusqlite = { version = "0.32", features = ["bundled"] }
 vitasdk-sys = { version = "0.3.3", features = [
     "SceAppMgr_stub",
     "SceAudio_stub",
@@ -14,9 +18,11 @@ vitasdk-sys = { version = "0.3.3", features = [
     "SceDisplay_stub",
     "SceGxm_stub",
     "SceIme_stub",
+    "SceIofilemgr_stub",
     "SceKernelDmacMgr_stub",
     "SceKernelThreadMgr_stub",
     "SceProcessmgr_stub",
+    "SceRtc_stub",
     "SceSysmem_stub",
     "SceTouch_stub",
 ] }

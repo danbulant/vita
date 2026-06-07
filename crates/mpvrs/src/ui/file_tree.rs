@@ -75,6 +75,10 @@ impl FileTreeView {
         self.status = status;
     }
 
+    pub fn current_dir(&self) -> &str {
+        &self.current_dir
+    }
+
     pub fn go_up(&mut self) {
         if self.current_dir == ROOT_PATH {
             self.status = format!("Already at {ROOT_PATH}");
@@ -181,7 +185,7 @@ impl FileTreeView {
                 self.files_list = files_list;
 
                 ui.separator();
-                ui.text("Cross: open/play  Circle: up  Triangle: refresh  Select: quit");
+                ui.text("Cross: open/play  Square: library  Circle: up  Triangle: refresh  Select: quit");
                 if let Some(playback) = playback {
                     let state = if playback.is_playing {
                         "playing"

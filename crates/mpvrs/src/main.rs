@@ -9,6 +9,7 @@ extern "C" {}
 #[no_mangle]
 pub static mut _newlib_heap_size_user: i32 = 64 * 1024 * 1024;
 
+mod library;
 mod plumbing;
 mod ui;
 
@@ -24,6 +25,7 @@ use plumbing::rendering::{
     clear_screen, init_vitagl, present, VitaGlImguiRenderer, SCREEN_H, SCREEN_W,
 };
 use ui::file_tree::{FileTreeAction, FileTreeView};
+use ui::library_page::{LibraryAction, LibraryView};
 use ui::player_page::PlayerView;
 
 const SEEK_STEP_SECONDS: f32 = 10.0;
@@ -35,6 +37,7 @@ struct AppState {
 
 enum Page {
     FileTree(FileTreeView),
+    Library(LibraryView),
     Player(PlayerView),
 }
 
@@ -49,6 +52,7 @@ impl AppState {
     fn refresh(&mut self) {
         match &mut self.page {
             Page::FileTree(page) => page.refresh(),
+            Page::Library(page) => page.refresh(),
             Page::Player(page) => page.refresh_browser(),
         }
     }
@@ -56,6 +60,17 @@ impl AppState {
     fn back(&mut self) {
         match &mut self.page {
             Page::FileTree(page) => page.go_up(),
+            Page::Library(page) => {
+                if page.back() {
+                    return;
+                }
+                let Page::Library(page) =
+                    std::mem::replace(&mut self.page, Page::FileTree(FileTreeView::new()))
+                else {
+                    unreachable!();
+                };
+                self.page = Page::FileTree(page.into_browser());
+            }
             Page::Player(_) => {
                 let Page::Player(page) =
                     std::mem::replace(&mut self.page, Page::FileTree(FileTreeView::new()))
@@ -64,6 +79,21 @@ impl AppState {
                 };
                 self.page = Page::FileTree(page.into_browser());
             }
+        }
+    }
+
+    fn open_library(&mut self) {
+        match &mut self.page {
+            Page::Library(page) => page.home(),
+            Page::FileTree(_) => {
+                let Page::FileTree(browser) =
+                    std::mem::replace(&mut self.page, Page::FileTree(FileTreeView::new()))
+                else {
+                    unreachable!();
+                };
+                self.page = Page::Library(LibraryView::new(browser));
+            }
+            Page::Player(_) => {}
         }
     }
 
@@ -83,6 +113,10 @@ impl AppState {
         let playback = self.player.as_ref().map(|player| player.snapshot());
         let action = match &mut self.page {
             Page::FileTree(page) => page.draw(ui, playback.as_ref(), controller_navigation_active),
+            Page::Library(page) => match page.draw(ui) {
+                Some(LibraryAction::OpenAudio(path)) => Some(FileTreeAction::OpenAudio(path)),
+                None => None,
+            },
             Page::Player(page) => {
                 page.draw(ui, self.player.as_ref());
                 None
@@ -90,10 +124,12 @@ impl AppState {
         };
 
         if let Some(FileTreeAction::OpenAudio(path)) = action {
-            let Page::FileTree(browser) =
-                std::mem::replace(&mut self.page, Page::FileTree(FileTreeView::new()))
-            else {
-                unreachable!();
+            let previous_page =
+                std::mem::replace(&mut self.page, Page::FileTree(FileTreeView::new()));
+            let browser = match previous_page {
+                Page::FileTree(browser) => browser,
+                Page::Library(page) => page.into_browser(),
+                Page::Player(page) => page.into_browser(),
             };
 
             self.player = None;
@@ -137,6 +173,9 @@ fn main() {
         let current_buttons = ctrl.buttons();
         if input::just_pressed(current_buttons, previous_buttons, Button::Triangle) {
             app.refresh();
+        }
+        if input::just_pressed(current_buttons, previous_buttons, Button::Square) {
+            app.open_library();
         }
         if input::just_pressed(current_buttons, previous_buttons, Button::Circle) {
             app.back();

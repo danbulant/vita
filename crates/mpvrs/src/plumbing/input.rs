@@ -24,6 +24,7 @@ const VITA_IMGUI_KEY_CROSS: u32 = 260;
 pub enum Button {
     Select,
     Triangle,
+    Square,
     Circle,
     Left,
     Right,
@@ -153,6 +154,7 @@ fn button_mask(button: Button) -> u32 {
     match button {
         Button::Select => SCE_CTRL_SELECT,
         Button::Triangle => SCE_CTRL_TRIANGLE,
+        Button::Square => SCE_CTRL_SQUARE,
         Button::Circle => SCE_CTRL_CIRCLE,
         Button::Left => SCE_CTRL_LEFT,
         Button::Right => SCE_CTRL_RIGHT,
