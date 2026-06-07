@@ -166,6 +166,51 @@ impl Drop for AudioPlayer {
     }
 }
 
+struct PowerInhibit {
+    enabled: bool,
+}
+
+impl PowerInhibit {
+    fn new() -> Self {
+        Self { enabled: false }
+    }
+
+    fn set_enabled(&mut self, enabled: bool) {
+        if self.enabled == enabled {
+            return;
+        }
+
+        unsafe {
+            if enabled {
+                sceKernelPowerLock(SCE_KERNEL_POWER_TICK_DISABLE_AUTO_SUSPEND);
+                sceKernelPowerLock(SCE_KERNEL_POWER_TICK_DISABLE_OLED_OFF);
+            } else {
+                sceKernelPowerUnlock(SCE_KERNEL_POWER_TICK_DISABLE_OLED_OFF);
+                sceKernelPowerUnlock(SCE_KERNEL_POWER_TICK_DISABLE_AUTO_SUSPEND);
+            }
+        }
+
+        self.enabled = enabled;
+    }
+
+    fn tick(&self) {
+        if !self.enabled {
+            return;
+        }
+
+        unsafe {
+            sceKernelPowerTick(SCE_KERNEL_POWER_TICK_DISABLE_AUTO_SUSPEND);
+            sceKernelPowerTick(SCE_KERNEL_POWER_TICK_DISABLE_OLED_OFF);
+        }
+    }
+}
+
+impl Drop for PowerInhibit {
+    fn drop(&mut self) {
+        self.set_enabled(false);
+    }
+}
+
 pub fn is_supported_audio_file(path: &str) -> bool {
     matches!(
         Path::new(path)
@@ -241,19 +286,15 @@ fn run_audio_thread(
         );
     }
 
-    unsafe {
-        sceKernelPowerLock(SCE_KERNEL_POWER_TICK_DISABLE_AUTO_SUSPEND);
-        sceKernelPowerLock(SCE_KERNEL_POWER_TICK_DISABLE_OLED_OFF);
-    }
+    let mut power_inhibit = PowerInhibit::new();
 
     let output_channels = info.channels.max(1).min(2) as usize;
     let mut buffer = vec![0_i16; AUDIO_GRAIN * output_channels];
 
     while !stop.load(Ordering::SeqCst) {
-        unsafe {
-            sceKernelPowerTick(SCE_KERNEL_POWER_TICK_DISABLE_AUTO_SUSPEND);
-            sceKernelPowerTick(SCE_KERNEL_POWER_TICK_DISABLE_OLED_OFF);
-        }
+        let is_playing = state.lock().unwrap().is_playing;
+        power_inhibit.set_enabled(is_playing);
+        power_inhibit.tick();
 
         let seek_to = {
             let mut commands = commands.lock().unwrap();
@@ -316,6 +357,7 @@ fn run_audio_thread(
                         let mut state = state.lock().unwrap();
                         state.is_playing = false;
                         state.status = "Finished".to_owned();
+                        power_inhibit.set_enabled(false);
                     }
                     state.lock().unwrap().position_frames = decoder.position_frames();
                 }
@@ -324,6 +366,7 @@ fn run_audio_thread(
                     let mut state = state.lock().unwrap();
                     state.is_playing = false;
                     state.status = format!("Decode failed: {err}");
+                    power_inhibit.set_enabled(false);
                 }
             }
         } else {
@@ -335,9 +378,9 @@ fn run_audio_thread(
         }
     }
 
+    power_inhibit.set_enabled(false);
+
     unsafe {
-        sceKernelPowerUnlock(SCE_KERNEL_POWER_TICK_DISABLE_OLED_OFF);
-        sceKernelPowerUnlock(SCE_KERNEL_POWER_TICK_DISABLE_AUTO_SUSPEND);
         sceAudioOutReleasePort(port);
         sceAppMgrReleaseBgmPort();
     }
