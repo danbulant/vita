@@ -16,6 +16,7 @@ pub struct LibraryView {
     page: LibraryPage,
     status: String,
     current_folder: String,
+    show_current_folder_action: bool,
     list: ScrollableList,
     scan: Option<JoinHandle<ScanProgress>>,
     last_scan: Option<ScanProgress>,
@@ -40,11 +41,12 @@ enum LibraryPage {
 
 #[derive(Clone, Debug)]
 pub enum LibraryAction {
+    BrowseFiles,
     OpenAudio(String),
 }
 
 impl LibraryView {
-    pub fn new(browser: FileTreeView) -> Self {
+    pub fn new(browser: FileTreeView, show_current_folder_action: bool) -> Self {
         let current_folder = browser.current_dir().to_owned();
         let mut view = Self {
             browser,
@@ -52,6 +54,7 @@ impl LibraryView {
             page: LibraryPage::Home,
             status: String::new(),
             current_folder,
+            show_current_folder_action,
             list: ScrollableList::new(),
             scan: None,
             last_scan: None,
@@ -62,6 +65,10 @@ impl LibraryView {
 
     pub fn into_browser(self) -> FileTreeView {
         self.browser
+    }
+
+    pub fn set_status(&mut self, status: String) {
+        self.status = status;
     }
 
     pub fn refresh(&mut self) {
@@ -154,9 +161,14 @@ impl LibraryView {
         if row(ui, "Roots", disable_hover) {
             self.load_roots();
         }
-        ui.separator();
-        if row(ui, &self.current_folder_action_label(), disable_hover) {
-            self.start_scan(self.current_folder.clone());
+        if row(ui, "Browse files", disable_hover) {
+            return Some(LibraryAction::BrowseFiles);
+        }
+        if self.show_current_folder_action {
+            ui.separator();
+            if row(ui, &self.current_folder_action_label(), disable_hover) {
+                self.start_scan(self.current_folder.clone());
+            }
         }
         None
     }

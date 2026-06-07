@@ -32,6 +32,7 @@ const SEEK_STEP_SECONDS: f32 = 10.0;
 
 struct AppState {
     page: Page,
+    history: Vec<Page>,
     player: Option<AudioPlayer>,
 }
 
@@ -44,7 +45,8 @@ enum Page {
 impl AppState {
     fn new() -> Self {
         Self {
-            page: Page::FileTree(FileTreeView::new()),
+            page: Page::Library(LibraryView::new(FileTreeView::new(), false)),
+            history: Vec::new(),
             player: None,
         }
     }
@@ -53,7 +55,7 @@ impl AppState {
         match &mut self.page {
             Page::FileTree(page) => page.refresh(),
             Page::Library(page) => page.refresh(),
-            Page::Player(page) => page.refresh_browser(),
+            Page::Player(_) => {}
         }
     }
 
@@ -61,24 +63,9 @@ impl AppState {
         match &mut self.page {
             Page::FileTree(page) => page.go_up(),
             Page::Library(page) => {
-                if page.back() {
-                    return;
-                }
-                let Page::Library(page) =
-                    std::mem::replace(&mut self.page, Page::FileTree(FileTreeView::new()))
-                else {
-                    unreachable!();
-                };
-                self.page = Page::FileTree(page.into_browser());
+                page.back();
             }
-            Page::Player(_) => {
-                let Page::Player(page) =
-                    std::mem::replace(&mut self.page, Page::FileTree(FileTreeView::new()))
-                else {
-                    unreachable!();
-                };
-                self.page = Page::FileTree(page.into_browser());
-            }
+            Page::Player(_) => self.pop_history_or_stay(),
         }
     }
 
@@ -91,9 +78,24 @@ impl AppState {
                 else {
                     unreachable!();
                 };
-                self.page = Page::Library(LibraryView::new(browser));
+                self.page = Page::Library(LibraryView::new(browser, true));
             }
             Page::Player(_) => {}
+        }
+    }
+
+    fn open_file_browser(&mut self) {
+        let Page::Library(page) =
+            std::mem::replace(&mut self.page, Page::FileTree(FileTreeView::new()))
+        else {
+            unreachable!();
+        };
+        self.page = Page::FileTree(page.into_browser());
+    }
+
+    fn pop_history_or_stay(&mut self) {
+        if let Some(previous_page) = self.history.pop() {
+            self.page = previous_page;
         }
     }
 
@@ -111,9 +113,14 @@ impl AppState {
 
     fn draw(&mut self, ui: &Ui, controller_navigation_active: bool) {
         let playback = self.player.as_ref().map(|player| player.snapshot());
+        let mut browse_files = false;
         let action = match &mut self.page {
             Page::FileTree(page) => page.draw(ui, playback.as_ref(), controller_navigation_active),
             Page::Library(page) => match page.draw(ui) {
+                Some(LibraryAction::BrowseFiles) => {
+                    browse_files = true;
+                    None
+                }
                 Some(LibraryAction::OpenAudio(path)) => Some(FileTreeAction::OpenAudio(path)),
                 None => None,
             },
@@ -123,26 +130,33 @@ impl AppState {
             }
         };
 
+        if browse_files {
+            self.open_file_browser();
+            return;
+        }
+
         if let Some(FileTreeAction::OpenAudio(path)) = action {
-            let previous_page =
-                std::mem::replace(&mut self.page, Page::FileTree(FileTreeView::new()));
-            let browser = match previous_page {
-                Page::FileTree(browser) => browser,
-                Page::Library(page) => page.into_browser(),
-                Page::Player(page) => page.into_browser(),
-            };
+            let mut previous_page =
+                std::mem::replace(&mut self.page, Page::Player(PlayerView::new()));
 
             self.player = None;
 
             match AudioPlayer::open(path) {
                 Ok(player) => {
                     self.player = Some(player);
-                    self.page = Page::Player(PlayerView::new(browser));
+                    self.history.push(previous_page);
                 }
                 Err(err) => {
-                    let mut browser = browser;
-                    browser.set_status(format!("Failed to open audio: {err}"));
-                    self.page = Page::FileTree(browser);
+                    match &mut previous_page {
+                        Page::FileTree(page) => {
+                            page.set_status(format!("Failed to open audio: {err}"))
+                        }
+                        Page::Library(page) => {
+                            page.set_status(format!("Failed to open audio: {err}"))
+                        }
+                        Page::Player(_) => {}
+                    }
+                    self.page = previous_page;
                 }
             }
         }

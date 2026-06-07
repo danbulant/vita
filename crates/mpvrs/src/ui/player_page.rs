@@ -2,29 +2,17 @@ use imgui::{StyleVar, Ui};
 
 use crate::plumbing::audio::AudioPlayer;
 use crate::plumbing::rendering::{SCREEN_H, SCREEN_W};
-use crate::ui::file_tree::FileTreeView;
-
 pub struct PlayerView {
-    browser: FileTreeView,
     error: Option<String>,
     seek_focused: bool,
 }
 
 impl PlayerView {
-    pub fn new(browser: FileTreeView) -> Self {
+    pub fn new() -> Self {
         Self {
-            browser,
             error: None,
             seek_focused: false,
         }
-    }
-
-    pub fn refresh_browser(&mut self) {
-        self.browser.refresh();
-    }
-
-    pub fn into_browser(self) -> FileTreeView {
-        self.browser
     }
 
     pub fn is_seek_focused(&self) -> bool {
@@ -100,7 +88,7 @@ impl PlayerView {
                 }
 
                 ui.separator();
-                ui.text("Cross: play/pause/seek  Circle: file browser  Select: quit");
+                ui.text("Cross: play/pause/seek  Circle: back  Select: quit");
             });
     }
 
@@ -117,7 +105,7 @@ impl PlayerView {
                     ui.text(format!("Error: {error}"));
                 }
                 ui.separator();
-                ui.text("Circle: file browser  Select: quit");
+                ui.text("Circle: back  Select: quit");
             });
     }
 }
