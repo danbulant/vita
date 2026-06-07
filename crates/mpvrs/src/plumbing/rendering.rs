@@ -117,6 +117,61 @@ pub fn present() {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct GlTexture {
+    pub gl_id: u32,
+    pub texture_id: TextureId,
+    pub bytes: usize,
+}
+
+pub fn create_rgba_texture(width: u32, height: u32, pixels: &[u8]) -> Option<GlTexture> {
+    let expected_len = width.checked_mul(height)?.checked_mul(4)? as usize;
+    if width == 0 || height == 0 || pixels.len() != expected_len {
+        return None;
+    }
+
+    let mut texture = 0;
+    unsafe {
+        let mut last_texture = 0;
+        glGetIntegerv(GL_TEXTURE_BINDING_2D, &mut last_texture);
+        glGenTextures(1, &mut texture);
+        if texture == 0 {
+            glBindTexture(GL_TEXTURE_2D, last_texture as c_uint);
+            return None;
+        }
+        glBindTexture(GL_TEXTURE_2D, texture);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexImage2D(
+            GL_TEXTURE_2D,
+            0,
+            GL_RGBA as c_int,
+            width as c_int,
+            height as c_int,
+            0,
+            GL_RGBA,
+            GL_UNSIGNED_BYTE,
+            pixels.as_ptr().cast(),
+        );
+        glBindTexture(GL_TEXTURE_2D, last_texture as c_uint);
+    }
+
+    Some(GlTexture {
+        gl_id: texture,
+        texture_id: TextureId::new(texture as usize),
+        bytes: expected_len,
+    })
+}
+
+pub fn delete_texture(gl_id: u32) {
+    if gl_id == 0 {
+        return;
+    }
+    unsafe {
+        glDeleteTextures(1, &gl_id);
+    }
+}
+
 pub struct VitaGlImguiRenderer {
     font_texture: c_uint,
     vertices: Vec<[f32; 3]>,

@@ -51,6 +51,7 @@ pub struct TrackDisplayRow {
     pub title: String,
     pub track_artist: Option<String>,
     pub album: Option<String>,
+    pub art_path: Option<String>,
 }
 
 pub struct LibraryDb {
@@ -291,15 +292,18 @@ impl LibraryDb {
     pub fn track_display_by_path(&self, path: &str) -> Result<Option<TrackDisplayRow>, String> {
         self.conn
             .query_row(
-                "SELECT COALESCE(title, filename), track_artist, album
+                "SELECT COALESCE(tracks.title, tracks.filename), tracks.track_artist, tracks.album,
+                        artwork.cache_path
                  FROM tracks
-                 WHERE path = ?1 AND missing = 0",
+                 LEFT JOIN artwork ON artwork.id = tracks.art_id
+                 WHERE tracks.path = ?1 AND tracks.missing = 0",
                 params![path],
                 |row| {
                     Ok(TrackDisplayRow {
                         title: row.get(0)?,
                         track_artist: row.get(1)?,
                         album: row.get(2)?,
+                        art_path: row.get(3)?,
                     })
                 },
             )

@@ -10,6 +10,7 @@ cc = "1"
 symphonia = { version = "0.5", default-features = false, features = ["all"] }
 imgui = "=0.12.0"
 rusqlite = { version = "0.32", features = ["bundled"] }
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
 vitasdk-sys = { version = "0.3.3", features = [
     "SceAppMgr_stub",
     "SceAudio_stub",

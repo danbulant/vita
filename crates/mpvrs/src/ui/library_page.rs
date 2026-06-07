@@ -4,12 +4,17 @@ use imgui::{Condition, Ui};
 
 use crate::library::db::normalize_root;
 use crate::library::{AlbumRow, ArtistRow, LibraryDb, RootRow, ScanProgress, Scanner, TrackRow};
+use crate::plumbing::audio::PlaybackMetadata;
 use crate::plumbing::rendering::{SCREEN_H, SCREEN_W};
+use crate::ui::components::cover_art::{draw_thumbnail_cover_art_at, CoverArtCache};
 use crate::ui::components::scrollable_list::ScrollableList;
 use crate::ui::file_tree::FileTreeView;
 use crate::ui::{draw_bottom_nav, NavAction};
 
 const ROW_HEIGHT: f32 = 46.0;
+const TRACK_ROW_HEIGHT: f32 = 60.0;
+const TRACK_ROW_SPACING: f32 = 6.0;
+const TRACK_ART_SIZE: f32 = 48.0;
 
 pub struct LibraryView {
     browser: FileTreeView,
@@ -43,7 +48,26 @@ enum LibraryPage {
 #[derive(Clone, Debug)]
 pub enum LibraryAction {
     BrowseFiles,
-    OpenAudio(String),
+    OpenAudio {
+        path: String,
+        metadata: PlaybackMetadata,
+    },
+}
+
+enum PendingLibraryAction {
+    ScanRoot(String),
+    LoadArtistTracks {
+        id: i64,
+        name: String,
+    },
+    LoadAlbumTracks {
+        id: i64,
+        title: String,
+    },
+    OpenAudio {
+        path: String,
+        metadata: PlaybackMetadata,
+    },
 }
 
 impl LibraryView {
@@ -90,6 +114,7 @@ impl LibraryView {
         window_title: &str,
         show_back: bool,
         show_player: bool,
+        cover_cache: &mut CoverArtCache,
     ) -> (Option<LibraryAction>, Option<NavAction>) {
         self.poll_scan();
         let mut action = None;
@@ -108,7 +133,11 @@ impl LibraryView {
                 let list_height = SCREEN_H as f32 - 176.0;
                 let mut list = std::mem::take(&mut self.list);
                 list.draw(ui, "library-list", [0.0, list_height], true, |ui, touch| {
-                    action = self.draw_page_rows(ui, touch.disable_hover || touch.suppress_click);
+                    action = self.draw_page_rows(
+                        ui,
+                        touch.disable_hover || touch.suppress_click,
+                        cover_cache,
+                    );
                 });
                 self.list = list;
 
@@ -147,18 +176,43 @@ impl LibraryView {
         self.page = LibraryPage::Home;
     }
 
-    fn draw_page_rows(&mut self, ui: &Ui, disable_hover: bool) -> Option<LibraryAction> {
-        match self.page.clone() {
-            LibraryPage::Home => self.draw_home(ui, disable_hover),
-            LibraryPage::Roots(roots) => self.draw_roots(ui, disable_hover, &roots),
-            LibraryPage::Artists(artists) => self.draw_artists(ui, disable_hover, &artists),
-            LibraryPage::Albums(albums) => self.draw_albums(ui, disable_hover, &albums),
+    fn draw_page_rows(
+        &mut self,
+        ui: &Ui,
+        disable_hover: bool,
+        cover_cache: &mut CoverArtCache,
+    ) -> Option<LibraryAction> {
+        if matches!(self.page, LibraryPage::Home) {
+            return self.draw_home(ui, disable_hover);
+        }
+
+        let pending = match &self.page {
+            LibraryPage::Home => unreachable!(),
+            LibraryPage::Roots(roots) => draw_roots(ui, disable_hover, roots),
+            LibraryPage::Artists(artists) => draw_artists(ui, disable_hover, artists),
+            LibraryPage::Albums(albums) => draw_albums(ui, disable_hover, albums),
             LibraryPage::Tracks(tracks)
             | LibraryPage::ArtistTracks { tracks, .. }
             | LibraryPage::AlbumTracks { tracks, .. } => {
-                self.draw_tracks(ui, disable_hover, &tracks)
+                draw_tracks(ui, disable_hover, tracks, cover_cache)
             }
+        };
+
+        match pending {
+            Some(PendingLibraryAction::ScanRoot(root)) => self.start_scan(root),
+            Some(PendingLibraryAction::LoadArtistTracks { id, name }) => {
+                self.load_artist_tracks(id, name)
+            }
+            Some(PendingLibraryAction::LoadAlbumTracks { id, title }) => {
+                self.load_album_tracks(id, title)
+            }
+            Some(PendingLibraryAction::OpenAudio { path, metadata }) => {
+                return Some(LibraryAction::OpenAudio { path, metadata });
+            }
+            None => {}
         }
+
+        None
     }
 
     fn draw_home(&mut self, ui: &Ui, disable_hover: bool) -> Option<LibraryAction> {
@@ -181,118 +235,6 @@ impl LibraryView {
             ui.separator();
             if row(ui, &self.current_folder_action_label(), disable_hover) {
                 self.start_scan(self.current_folder.clone());
-            }
-        }
-        None
-    }
-
-    fn draw_roots(
-        &mut self,
-        ui: &Ui,
-        disable_hover: bool,
-        roots: &[RootRow],
-    ) -> Option<LibraryAction> {
-        for root in roots {
-            let scanned = root
-                .last_scanned_at
-                .map(|ts| format!("last scan {ts}"))
-                .unwrap_or_else(|| "never scanned".to_owned());
-            let enabled = if root.enabled { "enabled" } else { "disabled" };
-            if row(
-                ui,
-                &format!("{} ({enabled}, {scanned})##root-{}", root.path, root.id),
-                disable_hover,
-            ) {
-                self.start_scan(root.path.clone());
-            }
-        }
-        None
-    }
-
-    fn draw_artists(
-        &mut self,
-        ui: &Ui,
-        disable_hover: bool,
-        artists: &[ArtistRow],
-    ) -> Option<LibraryAction> {
-        for artist in artists {
-            if row(
-                ui,
-                &format!(
-                    "{} - {} tracks##artist-{}",
-                    artist.name, artist.track_count, artist.id
-                ),
-                disable_hover,
-            ) {
-                self.load_artist_tracks(artist.id, artist.name.clone());
-            }
-        }
-        None
-    }
-
-    fn draw_albums(
-        &mut self,
-        ui: &Ui,
-        disable_hover: bool,
-        albums: &[AlbumRow],
-    ) -> Option<LibraryAction> {
-        for album in albums {
-            let year = album
-                .year
-                .map(|year| format!(" ({year})"))
-                .unwrap_or_default();
-            let art = album.art_path.as_deref().unwrap_or("no art");
-            if row(
-                ui,
-                &format!(
-                    "{} - {}{} - {} tracks - {}##album-{}",
-                    album.album_artist, album.title, year, album.track_count, art, album.id
-                ),
-                disable_hover,
-            ) {
-                self.load_album_tracks(album.id, album.title.clone());
-            }
-        }
-        None
-    }
-
-    fn draw_tracks(
-        &mut self,
-        ui: &Ui,
-        disable_hover: bool,
-        tracks: &[TrackRow],
-    ) -> Option<LibraryAction> {
-        for track in tracks {
-            let number = track
-                .track_number
-                .map(|number| format!("{number:02}. "))
-                .unwrap_or_default();
-            let duration = track
-                .duration_ms
-                .map(format_duration)
-                .unwrap_or_else(|| "--:--".to_owned());
-            let disc = track
-                .disc_number
-                .map(|disc| format!("d{disc} "))
-                .unwrap_or_default();
-            let art = track.art_path.as_deref().unwrap_or("no art");
-            if row(
-                ui,
-                &format!(
-                    "{}{}{} - {} - {} / {} [{}] - {}##track-{}",
-                    disc,
-                    number,
-                    track.title,
-                    track.track_artist,
-                    track.album_artist,
-                    track.album,
-                    duration,
-                    art,
-                    track.id
-                ),
-                disable_hover,
-            ) {
-                return Some(LibraryAction::OpenAudio(track.path.clone()));
             }
         }
         None
@@ -471,6 +413,167 @@ impl LibraryView {
             }
         }
     }
+}
+
+fn draw_roots(ui: &Ui, disable_hover: bool, roots: &[RootRow]) -> Option<PendingLibraryAction> {
+    for root in roots {
+        let scanned = root
+            .last_scanned_at
+            .map(|ts| format!("last scan {ts}"))
+            .unwrap_or_else(|| "never scanned".to_owned());
+        let enabled = if root.enabled { "enabled" } else { "disabled" };
+        if row(
+            ui,
+            &format!("{} ({enabled}, {scanned})##root-{}", root.path, root.id),
+            disable_hover,
+        ) {
+            return Some(PendingLibraryAction::ScanRoot(root.path.clone()));
+        }
+    }
+    None
+}
+
+fn draw_artists(
+    ui: &Ui,
+    disable_hover: bool,
+    artists: &[ArtistRow],
+) -> Option<PendingLibraryAction> {
+    for artist in artists {
+        if row(
+            ui,
+            &format!(
+                "{} - {} tracks##artist-{}",
+                artist.name, artist.track_count, artist.id
+            ),
+            disable_hover,
+        ) {
+            return Some(PendingLibraryAction::LoadArtistTracks {
+                id: artist.id,
+                name: artist.name.clone(),
+            });
+        }
+    }
+    None
+}
+
+fn draw_albums(ui: &Ui, disable_hover: bool, albums: &[AlbumRow]) -> Option<PendingLibraryAction> {
+    for album in albums {
+        let year = album
+            .year
+            .map(|year| format!(" ({year})"))
+            .unwrap_or_default();
+        let art = album.art_path.as_deref().unwrap_or("no art");
+        if row(
+            ui,
+            &format!(
+                "{} - {}{} - {} tracks - {}##album-{}",
+                album.album_artist, album.title, year, album.track_count, art, album.id
+            ),
+            disable_hover,
+        ) {
+            return Some(PendingLibraryAction::LoadAlbumTracks {
+                id: album.id,
+                title: album.title.clone(),
+            });
+        }
+    }
+    None
+}
+
+fn draw_tracks(
+    ui: &Ui,
+    disable_hover: bool,
+    tracks: &[TrackRow],
+    cover_cache: &mut CoverArtCache,
+) -> Option<PendingLibraryAction> {
+    let (start, end, top_skip, bottom_skip) = visible_track_range(ui, tracks.len());
+
+    if top_skip > 0.0 {
+        ui.dummy([0.0, top_skip]);
+    }
+
+    for track in &tracks[start..end] {
+        if track_row(ui, track, disable_hover, cover_cache) {
+            return Some(PendingLibraryAction::OpenAudio {
+                path: track.path.clone(),
+                metadata: PlaybackMetadata::new(
+                    track.title.clone(),
+                    Some(track.track_artist.clone()),
+                    Some(track.album.clone()),
+                    track.art_path.clone(),
+                ),
+            });
+        }
+    }
+
+    if bottom_skip > 0.0 {
+        ui.dummy([0.0, bottom_skip]);
+    }
+
+    None
+}
+
+fn visible_track_range(ui: &Ui, len: usize) -> (usize, usize, f32, f32) {
+    if len == 0 {
+        return (0, 0, 0.0, 0.0);
+    }
+
+    let stride = TRACK_ROW_HEIGHT + TRACK_ROW_SPACING;
+    let scroll_y = ui.scroll_y().max(0.0);
+    let viewport_h = ui.content_region_avail()[1].max(1.0);
+    let overscan_rows = 2_usize;
+
+    let first_visible = (scroll_y / stride).floor().max(0.0) as usize;
+    let start = first_visible.saturating_sub(overscan_rows).min(len);
+    let visible_rows =
+        ((viewport_h / stride).ceil() as usize).saturating_add(overscan_rows * 2 + 2);
+    let end = start.saturating_add(visible_rows).min(len);
+
+    let top_skip = start as f32 * stride;
+    let bottom_skip = len.saturating_sub(end) as f32 * stride;
+    (start, end, top_skip, bottom_skip)
+}
+
+fn track_row(
+    ui: &Ui,
+    track: &TrackRow,
+    disable_hover: bool,
+    cover_cache: &mut CoverArtCache,
+) -> bool {
+    let clicked = ui
+        .selectable_config(&format!("##track-{}", track.id))
+        .disabled(disable_hover)
+        .size([0.0, TRACK_ROW_HEIGHT])
+        .build();
+
+    let min = ui.item_rect_min();
+    let max = ui.item_rect_max();
+    let row_height = max[1] - min[1];
+    let art_x = min[0] + 6.0;
+    let art_y = min[1] + (row_height - TRACK_ART_SIZE) * 0.5;
+    draw_thumbnail_cover_art_at(
+        ui,
+        cover_cache,
+        track.art_path.as_deref(),
+        !disable_hover,
+        [art_x, art_y],
+        [TRACK_ART_SIZE, TRACK_ART_SIZE],
+    );
+
+    let duration = track
+        .duration_ms
+        .map(format_duration)
+        .unwrap_or_else(|| "--:--".to_owned());
+    let title = track.title.as_str();
+    let detail = format!("{} - {} ({duration})", track.track_artist, track.album);
+    let text_x = art_x + TRACK_ART_SIZE + 12.0;
+    let title_y = min[1] + 8.0;
+    let detail_y = min[1] + 32.0;
+    let draw_list = ui.get_window_draw_list();
+    draw_list.add_text([text_x, title_y], [0.94, 0.96, 1.0, 1.0], title);
+    draw_list.add_text([text_x, detail_y], [0.66, 0.72, 0.82, 1.0], detail);
+
+    clicked
 }
 
 fn row(ui: &Ui, label: &str, disable_hover: bool) -> bool {

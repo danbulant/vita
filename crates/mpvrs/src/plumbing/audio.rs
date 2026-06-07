@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
+use crate::plumbing::threading::{set_current_thread_priority, AUDIO_THREAD_PRIORITY};
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{Decoder as SymphoniaCodecDecoder, DecoderOptions, CODEC_TYPE_NULL};
 use symphonia::core::errors::Error as SymphoniaError;
@@ -13,6 +14,7 @@ use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use symphonia::core::units::Time;
 use symphonia::default::{get_codecs, get_probe};
+
 use vitasdk_sys::{
     sceAppMgrAcquireBgmPort, sceAppMgrReleaseBgmPort, sceAudioOutOpenPort, sceAudioOutOutput,
     sceAudioOutReleasePort, sceAudioOutSetVolume, sceKernelPowerLock, sceKernelPowerTick,
@@ -21,8 +23,9 @@ use vitasdk_sys::{
     SCE_KERNEL_POWER_TICK_DISABLE_AUTO_SUSPEND, SCE_KERNEL_POWER_TICK_DISABLE_OLED_OFF,
 };
 
-const AUDIO_GRAIN: usize = 960;
+const AUDIO_GRAIN: usize = 2048;
 const VITA_VOLUME_MAX: i32 = 0x8000;
+const PCM_GAIN_Q15: i32 = 28_672;
 
 fn clean_display_part(value: &str) -> Option<String> {
     let value = value.trim().trim_matches('\0').trim();
@@ -42,14 +45,21 @@ pub struct PlaybackMetadata {
     pub title: String,
     pub artist: Option<String>,
     pub album: Option<String>,
+    pub art_path: Option<String>,
 }
 
 impl PlaybackMetadata {
-    pub fn new(title: String, artist: Option<String>, album: Option<String>) -> Self {
+    pub fn new(
+        title: String,
+        artist: Option<String>,
+        album: Option<String>,
+        art_path: Option<String>,
+    ) -> Self {
         Self {
             title: clean_display_part(&title).unwrap_or(title),
             artist: artist.and_then(|value| clean_display_part(&value)),
             album: album.and_then(|value| clean_display_part(&value)),
+            art_path: art_path.and_then(|value| clean_display_part(&value)),
         }
     }
 
@@ -59,7 +69,7 @@ impl PlaybackMetadata {
             .or_else(|| Path::new(path).file_name())
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.to_owned());
-        Self::new(title, None, None)
+        Self::new(title, None, None, None)
     }
 
     pub fn display_title(&self) -> String {
@@ -293,6 +303,8 @@ fn run_audio_thread(
     commands: Arc<Mutex<Commands>>,
     stop: Arc<AtomicBool>,
 ) {
+    set_current_thread_priority("audio", AUDIO_THREAD_PRIORITY);
+
     unsafe {
         sceAppMgrAcquireBgmPort();
     }
@@ -692,11 +704,15 @@ impl Decoder {
 fn write_channels(out: &mut [i16], frame: usize, channels: usize, left: i16, right: i16) {
     let index = frame * channels;
     if channels == 1 {
-        out[index] = left;
+        out[index] = apply_pcm_gain(left);
     } else {
-        out[index] = left;
-        out[index + 1] = right;
+        out[index] = apply_pcm_gain(left);
+        out[index + 1] = apply_pcm_gain(right);
     }
+}
+
+fn apply_pcm_gain(sample: i16) -> i16 {
+    ((sample as i32 * PCM_GAIN_Q15) >> 15).clamp(i16::MIN as i32, i16::MAX as i32) as i16
 }
 
 fn sample_from_interleaved(data: &[i16], frame: usize, channels: usize, channel: usize) -> i16 {

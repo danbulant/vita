@@ -26,6 +26,7 @@ use plumbing::input::{self, Button};
 use plumbing::rendering::{
     clear_screen, init_vitagl, present, VitaGlImguiRenderer, SCREEN_H, SCREEN_W,
 };
+use ui::components::cover_art::CoverArtCache;
 use ui::file_tree::{FileTreeAction, FileTreeView};
 use ui::library_page::{LibraryAction, LibraryView};
 use ui::player_page::PlayerView;
@@ -37,6 +38,7 @@ struct AppState {
     page: Page,
     history: Vec<Page>,
     player: Option<AudioPlayer>,
+    cover_cache: CoverArtCache,
 }
 
 enum Page {
@@ -51,6 +53,7 @@ impl AppState {
             page: Page::Library(LibraryView::new(FileTreeView::new(), false)),
             history: Vec::new(),
             player: None,
+            cover_cache: CoverArtCache::new(),
         }
     }
 
@@ -133,6 +136,11 @@ impl AppState {
 
     fn draw(&mut self, ui: &Ui, controller_navigation_active: bool) {
         let playback = self.player.as_ref().map(|player| player.snapshot());
+        self.cover_cache.set_playback_active(
+            playback
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.is_playing),
+        );
         let window_title = playback
             .as_ref()
             .map(|playback| playback.name.as_str())
@@ -150,20 +158,36 @@ impl AppState {
                 show_player,
             ),
             Page::Library(page) => {
-                let (library_action, nav_action) =
-                    page.draw(ui, window_title, show_back, show_player);
+                let (library_action, nav_action) = page.draw(
+                    ui,
+                    window_title,
+                    show_back,
+                    show_player,
+                    &mut self.cover_cache,
+                );
                 let action = match library_action {
                     Some(LibraryAction::BrowseFiles) => {
                         browse_files = true;
                         None
                     }
-                    Some(LibraryAction::OpenAudio(path)) => Some(FileTreeAction::OpenAudio(path)),
+                    Some(LibraryAction::OpenAudio { path, metadata }) => {
+                        Some(FileTreeAction::OpenAudio {
+                            path,
+                            metadata: Some(metadata),
+                        })
+                    }
                     None => None,
                 };
                 (action, nav_action)
             }
             Page::Player(page) => {
-                let nav_action = page.draw(ui, self.player.as_ref(), window_title, show_back);
+                let nav_action = page.draw(
+                    ui,
+                    self.player.as_ref(),
+                    window_title,
+                    show_back,
+                    &mut self.cover_cache,
+                );
                 (None, nav_action)
             }
         };
@@ -181,12 +205,12 @@ impl AppState {
             return;
         }
 
-        if let Some(FileTreeAction::OpenAudio(path)) = action {
+        if let Some(FileTreeAction::OpenAudio { path, metadata }) = action {
             let mut previous_page =
                 std::mem::replace(&mut self.page, Page::Player(PlayerView::new()));
 
             self.player = None;
-            let metadata = playback_metadata_for_path(&path);
+            let metadata = metadata.unwrap_or_else(|| playback_metadata_for_path(&path));
 
             match AudioPlayer::open_with_metadata(path, metadata) {
                 Ok(player) => {
@@ -219,14 +243,19 @@ fn playback_metadata_for_path(path: &str) -> PlaybackMetadata {
 
     if let Ok(metadata) = read_track_metadata(path) {
         let title = metadata.title.unwrap_or(metadata.filename);
-        return PlaybackMetadata::new(title, Some(metadata.track_artist), metadata.album);
+        return PlaybackMetadata::new(
+            title,
+            Some(metadata.track_artist),
+            metadata.album,
+            metadata.artwork.map(|artwork| artwork.cache_path),
+        );
     }
 
     PlaybackMetadata::from_path(path)
 }
 
 fn playback_metadata_from_db_row(row: TrackDisplayRow) -> PlaybackMetadata {
-    PlaybackMetadata::new(row.title, row.track_artist, row.album)
+    PlaybackMetadata::new(row.title, row.track_artist, row.album, row.art_path)
 }
 
 fn main() {

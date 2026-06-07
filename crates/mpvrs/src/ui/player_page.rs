@@ -2,6 +2,9 @@ use imgui::{StyleVar, Ui};
 
 use crate::plumbing::audio::AudioPlayer;
 use crate::plumbing::rendering::{SCREEN_H, SCREEN_W};
+use crate::ui::components::cover_art::{
+    draw_cover_art, draw_play_pause_icon, CoverArtCache, CoverSize,
+};
 use crate::ui::{draw_bottom_nav, NavAction};
 pub struct PlayerView {
     error: Option<String>,
@@ -26,6 +29,7 @@ impl PlayerView {
         player: Option<&AudioPlayer>,
         window_title: &str,
         show_back: bool,
+        cover_cache: &mut CoverArtCache,
     ) -> Option<NavAction> {
         let Some(player) = player else {
             return self.draw_empty(ui, window_title, show_back);
@@ -42,16 +46,26 @@ impl PlayerView {
             .build(|| {
                 ui.text("Now playing");
                 ui.separator();
+
+                ui.set_cursor_pos([24.0, 62.0]);
+                draw_cover_art(
+                    ui,
+                    cover_cache,
+                    snapshot.metadata.art_path.as_deref(),
+                    CoverSize::Large,
+                    [320.0, 320.0],
+                );
+
+                ui.set_cursor_pos([370.0, 70.0]);
                 ui.text(&snapshot.metadata.title);
                 if let Some(artist) = &snapshot.metadata.artist {
-                    ui.text(format!("by {artist}"));
+                    ui.text(format!("Artist: {artist}"));
                 }
                 if let Some(album) = &snapshot.metadata.album {
-                    ui.text(format!("from {album}"));
+                    ui.text(format!("Album: {album}"));
                 }
-                ui.text(&snapshot.path);
-                ui.spacing();
 
+                ui.set_cursor_pos([370.0, 178.0]);
                 let mut progress = if let Some(duration) = snapshot.duration_seconds {
                     if duration > 0.0 {
                         (snapshot.position_seconds / duration).clamp(0.0, 1.0)
@@ -84,17 +98,25 @@ impl PlayerView {
                 seek_padding.pop();
                 ui.text(label);
 
-                ui.spacing();
-                let button_padding = ui.push_style_var(StyleVar::FramePadding([16.0, 12.0]));
-                let button = if snapshot.is_playing { "Pause" } else { "Play" };
-                if ui.button_with_size(button, [136.0, 48.0]) {
+                ui.set_cursor_pos([370.0, 254.0]);
+                let button_padding = ui.push_style_var(StyleVar::FramePadding([0.0, 0.0]));
+                if ui.button_with_size("##play-pause", [84.0, 84.0]) {
                     player.toggle_play_pause();
                 }
+                let button_min = ui.item_rect_min();
+                draw_play_pause_icon(
+                    ui,
+                    snapshot.is_playing,
+                    [button_min[0] + 10.0, button_min[1] + 10.0],
+                    64.0,
+                );
                 button_padding.pop();
 
-                if !snapshot.status.is_empty() {
-                    ui.same_line();
-                    ui.text(snapshot.status);
+                ui.set_cursor_pos([370.0, 354.0]);
+                ui.text_disabled(&snapshot.path);
+
+                if snapshot.status.to_ascii_lowercase().contains("failed") {
+                    ui.text(format!("Status: {}", snapshot.status));
                 }
                 if let Some(error) = &self.error {
                     ui.text(format!("Error: {error}"));

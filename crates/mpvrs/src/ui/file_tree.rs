@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use imgui::{Condition, Ui};
 
-use crate::plumbing::audio::{is_supported_audio_file, PlaybackSnapshot};
+use crate::plumbing::audio::{is_supported_audio_file, PlaybackMetadata, PlaybackSnapshot};
 use crate::plumbing::rendering::{SCREEN_H, SCREEN_W};
 use crate::ui::components::scrollable_list::ScrollableList;
 use crate::ui::{draw_bottom_nav, NavAction};
@@ -33,7 +33,10 @@ pub struct FileTreeView {
 
 #[derive(Clone, Debug)]
 pub enum FileTreeAction {
-    OpenAudio(String),
+    OpenAudio {
+        path: String,
+        metadata: Option<PlaybackMetadata>,
+    },
 }
 
 impl FileTreeView {
@@ -226,7 +229,10 @@ impl FileTreeView {
         } else if is_supported_audio_file(&entry.path) {
             self.selected = Some(idx);
             self.status = format!("Playing: {}", entry.path);
-            Some(FileTreeAction::OpenAudio(entry.path))
+            Some(FileTreeAction::OpenAudio {
+                path: entry.path,
+                metadata: None,
+            })
         } else {
             self.selected = Some(idx);
             self.status = format!("Unsupported file: {}", entry.path);
