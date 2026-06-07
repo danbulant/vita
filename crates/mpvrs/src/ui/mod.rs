@@ -7,10 +7,12 @@ use imgui::{StyleVar, Ui};
 
 use crate::plumbing::rendering::{SCREEN_H, SCREEN_W};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NavAction {
     Back,
     OpenPlayer,
+    OpenArtist(String),
+    OpenAlbum(String),
 }
 
 pub fn draw_bottom_nav(ui: &Ui, show_back: bool, show_player: bool) -> Option<NavAction> {

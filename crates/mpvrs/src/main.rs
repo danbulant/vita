@@ -69,7 +69,9 @@ impl AppState {
         match &mut self.page {
             Page::FileTree(page) => page.go_up(),
             Page::Library(page) => {
-                page.back();
+                if !page.back() {
+                    self.pop_history_or_stay();
+                }
             }
             Page::Player(_) => self.pop_history_or_stay(),
         }
@@ -108,7 +110,7 @@ impl AppState {
     fn can_go_back(&self) -> bool {
         match &self.page {
             Page::FileTree(page) => page.can_go_back(),
-            Page::Library(page) => page.can_go_back(),
+            Page::Library(page) => page.can_go_back() || !self.history.is_empty(),
             Page::Player(_) => !self.history.is_empty(),
         }
     }
@@ -120,6 +122,39 @@ impl AppState {
 
         let previous_page = std::mem::replace(&mut self.page, Page::Player(PlayerView::new()));
         self.history.push(previous_page);
+    }
+
+    fn open_library_artist(&mut self, artist: String) {
+        self.open_library_page(|page| page.open_artist_by_name(&artist));
+    }
+
+    fn open_library_album(&mut self, album: String) {
+        self.open_library_page(|page| page.open_album_by_title(&album));
+    }
+
+    fn open_library_page(&mut self, open_page: impl FnOnce(&mut LibraryView)) {
+        let previous_page = std::mem::replace(
+            &mut self.page,
+            Page::Library(LibraryView::new(FileTreeView::new(), false)),
+        );
+
+        match previous_page {
+            Page::Library(mut library) => {
+                open_page(&mut library);
+                self.page = Page::Library(library);
+            }
+            Page::FileTree(browser) => {
+                let mut library = LibraryView::new(browser, true);
+                open_page(&mut library);
+                self.page = Page::Library(library);
+            }
+            Page::Player(player_view) => {
+                let mut library = LibraryView::new(FileTreeView::new(), false);
+                open_page(&mut library);
+                self.page = Page::Library(library);
+                self.history.push(Page::Player(player_view));
+            }
+        }
     }
 
     fn seek_relative_seconds(&self, seconds: f32) {
@@ -201,6 +236,8 @@ impl AppState {
             match nav_action {
                 NavAction::Back => self.back(),
                 NavAction::OpenPlayer => self.open_player(),
+                NavAction::OpenArtist(artist) => self.open_library_artist(artist),
+                NavAction::OpenAlbum(album) => self.open_library_album(album),
             }
             return;
         }

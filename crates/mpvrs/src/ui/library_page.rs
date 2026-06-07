@@ -15,6 +15,9 @@ const ROW_HEIGHT: f32 = 46.0;
 const TRACK_ROW_HEIGHT: f32 = 60.0;
 const TRACK_ROW_SPACING: f32 = 6.0;
 const TRACK_ART_SIZE: f32 = 48.0;
+const ALBUM_ROW_HEIGHT: f32 = 64.0;
+const ALBUM_ROW_SPACING: f32 = 6.0;
+const ALBUM_ART_SIZE: f32 = 54.0;
 
 pub struct LibraryView {
     browser: FileTreeView,
@@ -176,6 +179,50 @@ impl LibraryView {
         self.page = LibraryPage::Home;
     }
 
+    pub fn open_artist_by_name(&mut self, artist_name: &str) {
+        self.ensure_db();
+        let Some(db) = &self.db else {
+            return;
+        };
+        let artist = match db.artists() {
+            Ok(artists) => artists
+                .into_iter()
+                .find(|artist| artist.name.eq_ignore_ascii_case(artist_name)),
+            Err(err) => {
+                self.status = format!("Failed to load artists: {err}");
+                return;
+            }
+        };
+
+        if let Some(artist) = artist {
+            self.load_artist_tracks(artist.id, artist.name);
+        } else {
+            self.status = format!("Artist not found in library: {artist_name}");
+        }
+    }
+
+    pub fn open_album_by_title(&mut self, album_title: &str) {
+        self.ensure_db();
+        let Some(db) = &self.db else {
+            return;
+        };
+        let album = match db.albums() {
+            Ok(albums) => albums
+                .into_iter()
+                .find(|album| album.title.eq_ignore_ascii_case(album_title)),
+            Err(err) => {
+                self.status = format!("Failed to load albums: {err}");
+                return;
+            }
+        };
+
+        if let Some(album) = album {
+            self.load_album_tracks(album.id, album.title);
+        } else {
+            self.status = format!("Album not found in library: {album_title}");
+        }
+    }
+
     fn draw_page_rows(
         &mut self,
         ui: &Ui,
@@ -190,7 +237,7 @@ impl LibraryView {
             LibraryPage::Home => unreachable!(),
             LibraryPage::Roots(roots) => draw_roots(ui, disable_hover, roots),
             LibraryPage::Artists(artists) => draw_artists(ui, disable_hover, artists),
-            LibraryPage::Albums(albums) => draw_albums(ui, disable_hover, albums),
+            LibraryPage::Albums(albums) => draw_albums(ui, disable_hover, albums, cover_cache),
             LibraryPage::Tracks(tracks)
             | LibraryPage::ArtistTracks { tracks, .. }
             | LibraryPage::AlbumTracks { tracks, .. } => {
@@ -456,27 +503,32 @@ fn draw_artists(
     None
 }
 
-fn draw_albums(ui: &Ui, disable_hover: bool, albums: &[AlbumRow]) -> Option<PendingLibraryAction> {
-    for album in albums {
-        let year = album
-            .year
-            .map(|year| format!(" ({year})"))
-            .unwrap_or_default();
-        let art = album.art_path.as_deref().unwrap_or("no art");
-        if row(
-            ui,
-            &format!(
-                "{} - {}{} - {} tracks - {}##album-{}",
-                album.album_artist, album.title, year, album.track_count, art, album.id
-            ),
-            disable_hover,
-        ) {
+fn draw_albums(
+    ui: &Ui,
+    disable_hover: bool,
+    albums: &[AlbumRow],
+    cover_cache: &mut CoverArtCache,
+) -> Option<PendingLibraryAction> {
+    let (start, end, top_skip, bottom_skip) =
+        visible_row_range(ui, albums.len(), ALBUM_ROW_HEIGHT, ALBUM_ROW_SPACING);
+
+    if top_skip > 0.0 {
+        ui.dummy([0.0, top_skip]);
+    }
+
+    for album in &albums[start..end] {
+        if album_row(ui, album, disable_hover, cover_cache) {
             return Some(PendingLibraryAction::LoadAlbumTracks {
                 id: album.id,
                 title: album.title.clone(),
             });
         }
     }
+
+    if bottom_skip > 0.0 {
+        ui.dummy([0.0, bottom_skip]);
+    }
+
     None
 }
 
@@ -486,7 +538,8 @@ fn draw_tracks(
     tracks: &[TrackRow],
     cover_cache: &mut CoverArtCache,
 ) -> Option<PendingLibraryAction> {
-    let (start, end, top_skip, bottom_skip) = visible_track_range(ui, tracks.len());
+    let (start, end, top_skip, bottom_skip) =
+        visible_row_range(ui, tracks.len(), TRACK_ROW_HEIGHT, TRACK_ROW_SPACING);
 
     if top_skip > 0.0 {
         ui.dummy([0.0, top_skip]);
@@ -513,12 +566,17 @@ fn draw_tracks(
     None
 }
 
-fn visible_track_range(ui: &Ui, len: usize) -> (usize, usize, f32, f32) {
+fn visible_row_range(
+    ui: &Ui,
+    len: usize,
+    row_height: f32,
+    row_spacing: f32,
+) -> (usize, usize, f32, f32) {
     if len == 0 {
         return (0, 0, 0.0, 0.0);
     }
 
-    let stride = TRACK_ROW_HEIGHT + TRACK_ROW_SPACING;
+    let stride = row_height + row_spacing;
     let scroll_y = ui.scroll_y().max(0.0);
     let viewport_h = ui.content_region_avail()[1].max(1.0);
     let overscan_rows = 2_usize;
@@ -532,6 +590,51 @@ fn visible_track_range(ui: &Ui, len: usize) -> (usize, usize, f32, f32) {
     let top_skip = start as f32 * stride;
     let bottom_skip = len.saturating_sub(end) as f32 * stride;
     (start, end, top_skip, bottom_skip)
+}
+
+fn album_row(
+    ui: &Ui,
+    album: &AlbumRow,
+    disable_hover: bool,
+    cover_cache: &mut CoverArtCache,
+) -> bool {
+    let clicked = ui
+        .selectable_config(&format!("##album-{}", album.id))
+        .disabled(disable_hover)
+        .size([0.0, ALBUM_ROW_HEIGHT])
+        .build();
+
+    let min = ui.item_rect_min();
+    let max = ui.item_rect_max();
+    let row_height = max[1] - min[1];
+    let art_x = min[0] + 6.0;
+    let art_y = min[1] + (row_height - ALBUM_ART_SIZE) * 0.5;
+    draw_thumbnail_cover_art_at(
+        ui,
+        cover_cache,
+        album.art_path.as_deref(),
+        !disable_hover,
+        [art_x, art_y],
+        [ALBUM_ART_SIZE, ALBUM_ART_SIZE],
+    );
+
+    let year = album.year.map(|year| year.to_string());
+    let mut detail = album.album_artist.clone();
+    if let Some(year) = year {
+        detail.push_str(" • ");
+        detail.push_str(&year);
+    }
+    detail.push_str(" • ");
+    detail.push_str(&format_track_count(album.track_count));
+
+    let text_x = art_x + ALBUM_ART_SIZE + 12.0;
+    let title_y = min[1] + 9.0;
+    let detail_y = min[1] + 35.0;
+    let draw_list = ui.get_window_draw_list();
+    draw_list.add_text([text_x, title_y], [0.94, 0.96, 1.0, 1.0], &album.title);
+    draw_list.add_text([text_x, detail_y], [0.66, 0.72, 0.82, 1.0], detail);
+
+    clicked
 }
 
 fn track_row(
@@ -581,6 +684,14 @@ fn row(ui: &Ui, label: &str, disable_hover: bool) -> bool {
         .disabled(disable_hover)
         .size([0.0, ROW_HEIGHT])
         .build()
+}
+
+fn format_track_count(track_count: i64) -> String {
+    if track_count == 1 {
+        "1 track".to_owned()
+    } else {
+        format!("{track_count} tracks")
+    }
 }
 
 fn format_duration(ms: i64) -> String {
