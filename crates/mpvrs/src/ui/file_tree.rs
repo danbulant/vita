@@ -1,8 +1,8 @@
 use std::fs;
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use imgui::{Condition, MouseButton, StyleVar, Ui};
+use imgui::{Condition, MouseButton, StyleVar, Ui, WindowHoveredFlags};
 
 use crate::plumbing::audio::{is_supported_audio_file, PlaybackSnapshot};
 use crate::plumbing::rendering::{SCREEN_H, SCREEN_W};
@@ -10,6 +10,9 @@ use crate::plumbing::rendering::{SCREEN_H, SCREEN_W};
 const ROOT_PATH: &str = "ux0:/";
 const FILE_ROW_HEIGHT: f32 = 44.0;
 const FILE_ICON_SIZE: f32 = 20.0;
+const TOUCH_SCROLL_DRAG_THRESHOLD: f32 = 18.0;
+const TOUCH_SCROLL_HOLD_THRESHOLD: Duration = Duration::from_millis(250);
+const TOUCH_HOVER_DISABLE_THRESHOLD: f32 = 1.0;
 
 #[derive(Clone, Debug)]
 struct FileEntry {
@@ -25,11 +28,23 @@ pub struct FileTreeView {
     status: String,
     last_refresh: Instant,
     focus_selected: bool,
+    selection_visible: bool,
+    touch_scroll_active: bool,
+    touch_scroll_gesture: bool,
+    touch_scroll_ignore_delta: bool,
+    touch_scroll_distance: f32,
+    touch_scroll_started_at: Option<Instant>,
 }
 
 #[derive(Clone, Debug)]
 pub enum FileTreeAction {
     OpenAudio(String),
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct TouchScrollState {
+    suppress_click: bool,
+    disable_hover: bool,
 }
 
 impl FileTreeView {
@@ -41,6 +56,12 @@ impl FileTreeView {
             status: String::new(),
             last_refresh: Instant::now(),
             focus_selected: true,
+            selection_visible: true,
+            touch_scroll_active: false,
+            touch_scroll_gesture: false,
+            touch_scroll_ignore_delta: false,
+            touch_scroll_distance: 0.0,
+            touch_scroll_started_at: None,
         };
         view.refresh();
         view
@@ -53,12 +74,14 @@ impl FileTreeView {
                 self.selected = first_entry_index(&self.entries);
                 self.status.clear();
                 self.focus_selected = true;
+                self.selection_visible = true;
             }
             Err(err) => {
                 self.entries.clear();
                 self.selected = None;
                 self.status = format!("Failed to read {}: {err}", self.current_dir);
                 self.focus_selected = false;
+                self.selection_visible = false;
             }
         }
         self.last_refresh = Instant::now();
@@ -78,8 +101,18 @@ impl FileTreeView {
         self.refresh();
     }
 
-    pub fn draw(&mut self, ui: &Ui, playback: Option<&PlaybackSnapshot>) -> Option<FileTreeAction> {
+    pub fn draw(
+        &mut self,
+        ui: &Ui,
+        playback: Option<&PlaybackSnapshot>,
+        controller_navigation_active: bool,
+    ) -> Option<FileTreeAction> {
         let mut action = None;
+
+        if controller_navigation_active && !self.selection_visible {
+            self.selection_visible = true;
+            self.focus_selected = true;
+        }
 
         ui.window("File browser")
             .position([0.0, 0.0], Condition::Always)
@@ -103,16 +136,23 @@ impl FileTreeView {
                         let item_padding = ui.push_style_var(StyleVar::FramePadding([8.0, 10.0]));
                         let item_spacing = ui.push_style_var(StyleVar::ItemSpacing([4.0, 6.0]));
 
-                        if ui.is_window_hovered() && ui.is_mouse_dragging(MouseButton::Left) {
-                            let delta_y = ui.io().mouse_delta[1];
-                            if delta_y.abs() > 0.0 {
-                                ui.set_scroll_y((ui.scroll_y() - delta_y).max(0.0));
-                            }
-                        }
+                        let touch = self.update_touch_scroll(ui);
 
                         if self.current_dir != ROOT_PATH {
-                            if draw_file_row(ui, "..##parent", FileRowIcon::Up, false) {
+                            if draw_file_row(
+                                ui,
+                                "..##parent",
+                                FileRowIcon::Up,
+                                false,
+                                touch.disable_hover,
+                            ) && !touch.suppress_click
+                            {
+                                let keep_selection_hidden = !self.selection_visible;
                                 self.go_up();
+                                if keep_selection_hidden {
+                                    self.selection_visible = false;
+                                    self.focus_selected = false;
+                                }
                             }
                         }
 
@@ -127,25 +167,33 @@ impl FileTreeView {
                             };
                             let label = format!("{}##{}", entry.name, idx);
                             let selected = self.selected == Some(idx);
+                            let show_selected = selected && self.selection_visible;
 
-                            if selected && self.focus_selected {
+                            if show_selected && self.focus_selected {
                                 ui.set_keyboard_focus_here();
                             }
 
-                            if draw_file_row(ui, &label, icon, selected) {
+                            if draw_file_row(ui, &label, icon, show_selected, touch.disable_hover)
+                                && !touch.suppress_click
+                            {
                                 activated = Some(idx);
                             }
-                            if ui.is_item_focused() {
+                            if self.selection_visible && ui.is_item_focused() {
                                 self.selected = Some(idx);
                                 self.focus_selected = false;
                             }
-                            if selected {
+                            if show_selected {
                                 ui.set_item_default_focus();
                             }
                         }
 
                         if let Some(idx) = activated {
+                            let keep_selection_hidden = !self.selection_visible;
                             action = self.activate_entry(idx);
+                            if keep_selection_hidden {
+                                self.selection_visible = false;
+                                self.focus_selected = false;
+                            }
                         }
 
                         item_spacing.pop();
@@ -170,6 +218,65 @@ impl FileTreeView {
             });
 
         action
+    }
+
+    fn update_touch_scroll(&mut self, ui: &Ui) -> TouchScrollState {
+        if ui.is_mouse_clicked(MouseButton::Left)
+            && ui
+                .is_window_hovered_with_flags(WindowHoveredFlags::ALLOW_WHEN_BLOCKED_BY_ACTIVE_ITEM)
+        {
+            self.selection_visible = false;
+            self.focus_selected = false;
+            self.touch_scroll_active = true;
+            self.touch_scroll_gesture = false;
+            self.touch_scroll_ignore_delta = true;
+            self.touch_scroll_distance = 0.0;
+            self.touch_scroll_started_at = Some(Instant::now());
+        }
+
+        let mut disable_hover = false;
+
+        if self.touch_scroll_active && ui.io().mouse_down[MouseButton::Left as usize] {
+            let delta_y = if self.touch_scroll_ignore_delta {
+                self.touch_scroll_ignore_delta = false;
+                0.0
+            } else {
+                ui.io().mouse_delta[1]
+            };
+            let delta_y_abs = delta_y.abs();
+            self.touch_scroll_distance += delta_y_abs;
+            disable_hover =
+                delta_y_abs >= TOUCH_HOVER_DISABLE_THRESHOLD || self.touch_scroll_gesture;
+
+            if self.touch_scroll_distance >= TOUCH_SCROLL_DRAG_THRESHOLD
+                || self
+                    .touch_scroll_started_at
+                    .is_some_and(|started_at| started_at.elapsed() >= TOUCH_SCROLL_HOLD_THRESHOLD)
+            {
+                self.touch_scroll_gesture = true;
+            }
+
+            if self.touch_scroll_gesture && delta_y_abs > 0.0 {
+                let scroll_y = (ui.scroll_y() - delta_y).clamp(0.0, ui.scroll_max_y());
+                ui.set_scroll_y(scroll_y);
+            }
+        }
+
+        let suppress_click = self.touch_scroll_gesture;
+        disable_hover |= suppress_click;
+
+        if self.touch_scroll_active && ui.is_mouse_released(MouseButton::Left) {
+            self.touch_scroll_active = false;
+            self.touch_scroll_gesture = false;
+            self.touch_scroll_ignore_delta = false;
+            self.touch_scroll_distance = 0.0;
+            self.touch_scroll_started_at = None;
+        }
+
+        TouchScrollState {
+            suppress_click,
+            disable_hover,
+        }
     }
 
     fn activate_entry(&mut self, idx: usize) -> Option<FileTreeAction> {
@@ -201,12 +308,19 @@ enum FileRowIcon {
     File,
 }
 
-fn draw_file_row(ui: &Ui, label: &str, icon: FileRowIcon, selected: bool) -> bool {
+fn draw_file_row(
+    ui: &Ui,
+    label: &str,
+    icon: FileRowIcon,
+    selected: bool,
+    disable_hover: bool,
+) -> bool {
     let (visible_label, id) = split_imgui_label(label);
     let hidden_label = format!("##{id}");
     let clicked = ui
         .selectable_config(&hidden_label)
         .selected(selected)
+        .disabled(disable_hover)
         .size([0.0, FILE_ROW_HEIGHT])
         .build();
 

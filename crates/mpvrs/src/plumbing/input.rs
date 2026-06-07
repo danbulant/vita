@@ -90,6 +90,14 @@ pub fn pressed(ctrl: &ControllerState, button: Button) -> bool {
     (ctrl.buttons & button_mask(button)) != 0
 }
 
+pub fn navigation_pressed(ctrl: &ControllerState) -> bool {
+    ctrl_pressed(ctrl, SCE_CTRL_UP)
+        || ctrl_pressed(ctrl, SCE_CTRL_DOWN)
+        || ctrl_pressed(ctrl, SCE_CTRL_CROSS)
+        || ctrl_pressed(ctrl, SCE_CTRL_LTRIGGER)
+        || ctrl_pressed(ctrl, SCE_CTRL_RTRIGGER)
+}
+
 pub fn just_pressed(current_buttons: u32, previous_buttons: u32, button: Button) -> bool {
     (current_buttons & !previous_buttons & button_mask(button)) != 0
 }

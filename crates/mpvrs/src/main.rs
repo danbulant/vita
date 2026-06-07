@@ -79,10 +79,10 @@ impl AppState {
         }
     }
 
-    fn draw(&mut self, ui: &Ui) {
+    fn draw(&mut self, ui: &Ui, controller_navigation_active: bool) {
         let playback = self.player.as_ref().map(|player| player.snapshot());
         let action = match &mut self.page {
-            Page::FileTree(page) => page.draw(ui, playback.as_ref()),
+            Page::FileTree(page) => page.draw(ui, playback.as_ref(), controller_navigation_active),
             Page::Player(page) => {
                 page.draw(ui, self.player.as_ref());
                 None
@@ -163,7 +163,7 @@ fn main() {
         }
 
         let ui = imgui.frame();
-        app.draw(ui);
+        app.draw(ui, input::navigation_pressed(&ctrl));
 
         clear_screen();
         let draw_data = imgui.render();
