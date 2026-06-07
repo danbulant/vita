@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 use std::time::Instant;
 
-use imgui::{Condition, StyleVar, Ui};
+use imgui::{Condition, MouseButton, StyleVar, Ui};
 
 use crate::audio::{is_supported_audio_file, PlaybackSnapshot};
 use crate::rendering::{SCREEN_H, SCREEN_W};
@@ -10,7 +10,6 @@ use crate::rendering::{SCREEN_H, SCREEN_W};
 const ROOT_PATH: &str = "ux0:/";
 const FILE_ROW_HEIGHT: f32 = 44.0;
 const FILE_ICON_SIZE: f32 = 20.0;
-const FILE_LABEL_INDENT: &str = "      ";
 
 #[derive(Clone, Debug)]
 struct FileEntry {
@@ -104,6 +103,13 @@ impl FileTreeView {
                         let item_padding = ui.push_style_var(StyleVar::FramePadding([8.0, 10.0]));
                         let item_spacing = ui.push_style_var(StyleVar::ItemSpacing([4.0, 6.0]));
 
+                        if ui.is_window_hovered() && ui.is_mouse_dragging(MouseButton::Left) {
+                            let delta_y = ui.io().mouse_delta[1];
+                            if delta_y.abs() > 0.0 {
+                                ui.set_scroll_y((ui.scroll_y() - delta_y).max(0.0));
+                            }
+                        }
+
                         if self.current_dir != ROOT_PATH {
                             if draw_file_row(ui, "..##parent", FileRowIcon::Up, false) {
                                 self.go_up();
@@ -119,7 +125,7 @@ impl FileTreeView {
                             } else {
                                 FileRowIcon::File
                             };
-                            let label = format!("{}{}##{}", FILE_LABEL_INDENT, entry.name, idx);
+                            let label = format!("{}##{}", entry.name, idx);
                             let selected = self.selected == Some(idx);
 
                             if selected && self.focus_selected {
@@ -196,19 +202,35 @@ enum FileRowIcon {
 }
 
 fn draw_file_row(ui: &Ui, label: &str, icon: FileRowIcon, selected: bool) -> bool {
+    let (visible_label, id) = split_imgui_label(label);
+    let hidden_label = format!("##{id}");
     let clicked = ui
-        .selectable_config(label)
+        .selectable_config(&hidden_label)
         .selected(selected)
         .size([0.0, FILE_ROW_HEIGHT])
         .build();
 
     let min = ui.item_rect_min();
     let max = ui.item_rect_max();
-    let y = min[1] + ((max[1] - min[1]) - FILE_ICON_SIZE) * 0.5;
-    let x = min[0] + 8.0;
-    draw_file_icon(ui, icon, [x, y], FILE_ICON_SIZE);
+    let row_height = max[1] - min[1];
+    let icon_y = min[1] + (row_height - FILE_ICON_SIZE) * 0.5;
+    let icon_x = min[0] + 8.0;
+    draw_file_icon(ui, icon, [icon_x, icon_y], FILE_ICON_SIZE);
+
+    let text_size = ui.calc_text_size(visible_label);
+    let text_x = icon_x + FILE_ICON_SIZE + 12.0;
+    let text_y = min[1] + (row_height - text_size[1]) * 0.5;
+    ui.get_window_draw_list()
+        .add_text([text_x, text_y], [0.92, 0.94, 0.98, 1.0], visible_label);
 
     clicked
+}
+
+fn split_imgui_label(label: &str) -> (&str, &str) {
+    match label.split_once("##") {
+        Some((visible, id)) => (visible, id),
+        None => (label, label),
+    }
 }
 
 fn draw_file_icon(ui: &Ui, icon: FileRowIcon, pos: [f32; 2], size: f32) {

@@ -4,6 +4,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use claxon::frame::Block;
 use claxon::FlacReader;
@@ -60,6 +61,7 @@ impl SharedState {
 #[derive(Debug, Default)]
 struct Commands {
     seek_to: Option<f32>,
+    seek_generation: u64,
 }
 
 pub struct AudioPlayer {
@@ -135,7 +137,9 @@ impl AudioPlayer {
 
     pub fn seek_percent(&self, percent: f32) {
         let percent = percent.clamp(0.0, 1.0);
-        self.commands.lock().unwrap().seek_to = Some(percent);
+        let mut commands = self.commands.lock().unwrap();
+        commands.seek_to = Some(percent);
+        commands.seek_generation = commands.seek_generation.wrapping_add(1);
     }
 
     pub fn seek_relative_seconds(&self, seconds: f32) {
@@ -229,9 +233,33 @@ fn run_audio_thread(
             sceKernelPowerTick(SCE_KERNEL_POWER_TICK_DISABLE_OLED_OFF);
         }
 
-        if let Some(percent) = commands.lock().unwrap().seek_to.take() {
-            match decoder.seek_percent(&path, percent) {
-                Ok(position_frames) => {
+        let seek_to = {
+            let mut commands = commands.lock().unwrap();
+            commands
+                .seek_to
+                .take()
+                .map(|percent| (percent, commands.seek_generation))
+        };
+
+        if let Some((percent, generation)) = seek_to {
+            eprintln!("mpvrs: seek start percent={percent:.3} generation={generation}");
+            state.lock().unwrap().status = "Seeking...".to_owned();
+            let seek_started = std::time::Instant::now();
+
+            let mut should_cancel = || {
+                commands
+                    .lock()
+                    .map(|commands| commands.seek_generation != generation)
+                    .unwrap_or(false)
+            };
+
+            match decoder.seek_percent(&path, percent, &mut should_cancel) {
+                Ok(SeekOutcome::Complete(position_frames)) => {
+                    let elapsed = seek_started.elapsed();
+                    eprintln!(
+                        "mpvrs: seek decoder complete percent={percent:.3} generation={generation} frames={position_frames} elapsed_ms={}",
+                        elapsed.as_millis()
+                    );
                     let mut state = state.lock().unwrap();
                     state.position_frames = position_frames;
                     state.status = if state.is_playing {
@@ -241,7 +269,19 @@ fn run_audio_thread(
                     }
                     .to_owned();
                 }
-                Err(err) => state.lock().unwrap().status = format!("Seek failed: {err}"),
+                Ok(SeekOutcome::Cancelled) => {
+                    let elapsed = seek_started.elapsed();
+                    eprintln!(
+                        "mpvrs: seek cancelled percent={percent:.3} generation={generation} elapsed_ms={}",
+                        elapsed.as_millis()
+                    );
+                }
+                Err(err) => {
+                    eprintln!(
+                        "mpvrs: seek failed percent={percent:.3} generation={generation}: {err}"
+                    );
+                    state.lock().unwrap().status = format!("Seek failed: {err}");
+                }
             }
         }
 
@@ -286,6 +326,11 @@ struct StreamInfo {
     sample_rate: u32,
     channels: u32,
     total_frames: Option<u64>,
+}
+
+enum SeekOutcome {
+    Complete(u64),
+    Cancelled,
 }
 
 enum Decoder {
@@ -334,10 +379,15 @@ impl Decoder {
         }
     }
 
-    fn seek_percent(&mut self, path: &str, percent: f32) -> Result<u64, String> {
+    fn seek_percent(
+        &mut self,
+        path: &str,
+        percent: f32,
+        should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<SeekOutcome, String> {
         match self {
-            Self::Mp3(decoder) => decoder.seek_percent(path, percent),
-            Self::Flac(decoder) => decoder.seek_percent(path, percent),
+            Self::Mp3(decoder) => decoder.seek_percent(path, percent, should_cancel),
+            Self::Flac(decoder) => decoder.seek_percent(path, percent, should_cancel),
             Self::Ogg(decoder) => decoder.seek_percent(percent),
         }
     }
@@ -440,14 +490,52 @@ impl Mp3Decoder {
         Ok(written_frames)
     }
 
-    fn seek_percent(&mut self, path: &str, percent: f32) -> Result<u64, String> {
+    fn seek_percent(
+        &mut self,
+        _path: &str,
+        percent: f32,
+        should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<SeekOutcome, String> {
         let Some(total_frames) = self.info.total_frames else {
-            return Ok(self.position_frames);
+            return Ok(SeekOutcome::Complete(self.position_frames));
         };
-        let target = (total_frames as f32 * percent.clamp(0.0, 1.0)) as u64;
-        *self = Self::open(path)?;
-        skip_frames(self, target)?;
-        Ok(self.position_frames)
+
+        let percent = percent.clamp(0.0, 1.0);
+        let target = (total_frames as f32 * percent) as u64;
+        let mut offset = (self.data.len() as f32 * percent) as usize;
+        offset = offset.min(self.data.len().saturating_sub(1));
+
+        if should_cancel() {
+            return Ok(SeekOutcome::Cancelled);
+        }
+
+        self.decoder = new_mp3_decoder();
+        self.current.clear();
+        self.current_offset = 0;
+        self.offset = offset;
+        self.position_frames = target;
+
+        if let Some(frame) =
+            decode_next_mp3_frame(&self.data, &mut self.offset, &mut *self.decoder)?
+        {
+            self.current = frame.data;
+            self.current_channels = frame.channels.max(1);
+        } else if offset > 0 {
+            if should_cancel() {
+                return Ok(SeekOutcome::Cancelled);
+            }
+
+            self.decoder = new_mp3_decoder();
+            self.offset = offset.saturating_sub(64 * 1024);
+            if let Some(frame) =
+                decode_next_mp3_frame(&self.data, &mut self.offset, &mut *self.decoder)?
+            {
+                self.current = frame.data;
+                self.current_channels = frame.channels.max(1);
+            }
+        }
+
+        Ok(SeekOutcome::Complete(self.position_frames))
     }
 }
 
@@ -472,15 +560,18 @@ fn decode_next_mp3_frame(
     offset: &mut usize,
     decoder: &mut mp3dec_t,
 ) -> Result<Option<DecodedMp3Frame>, String> {
+    const MP3_SCAN_WINDOW: usize = 64 * 1024;
+
     while *offset < data.len() {
         let available = data.len() - *offset;
+        let probe_len = available.min(MP3_SCAN_WINDOW);
         let mut pcm = vec![0_i16; MINIMP3_MAX_SAMPLES_PER_FRAME as usize];
         let mut info = unsafe { std::mem::zeroed::<mp3dec_frame_info_t>() };
         let samples = unsafe {
             mp3dec_decode_frame(
                 decoder,
-                data[*offset..].as_ptr(),
-                available.min(i32::MAX as usize) as i32,
+                data[*offset..*offset + probe_len].as_ptr(),
+                probe_len as i32,
                 pcm.as_mut_ptr(),
                 &mut info,
             )
@@ -489,7 +580,8 @@ fn decode_next_mp3_frame(
         if info.frame_bytes > 0 {
             *offset += info.frame_bytes as usize;
         } else {
-            break;
+            *offset += probe_len.min(4096).max(1);
+            continue;
         }
 
         if samples > 0 {
@@ -581,15 +673,22 @@ impl FlacDecoder {
         Ok(written_frames)
     }
 
-    fn seek_percent(&mut self, path: &str, percent: f32) -> Result<u64, String> {
+    fn seek_percent(
+        &mut self,
+        path: &str,
+        percent: f32,
+        should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<SeekOutcome, String> {
         let target = self
             .info
             .total_frames
             .map(|total| (total as f32 * percent.clamp(0.0, 1.0)) as u64)
             .unwrap_or(0);
         *self = Self::open(path)?;
-        skip_frames(self, target)?;
-        Ok(self.position_frames)
+        if !skip_frames(self, target, should_cancel)? {
+            return Ok(SeekOutcome::Cancelled);
+        }
+        Ok(SeekOutcome::Complete(self.position_frames))
     }
 }
 
@@ -672,7 +771,7 @@ impl OggDecoder {
         Ok(written_frames)
     }
 
-    fn seek_percent(&mut self, percent: f32) -> Result<u64, String> {
+    fn seek_percent(&mut self, percent: f32) -> Result<SeekOutcome, String> {
         if let Some(total_frames) = self.info.total_frames {
             let target = (total_frames as f32 * percent.clamp(0.0, 1.0)) as u64;
             self.reader
@@ -682,7 +781,7 @@ impl OggDecoder {
             self.packet_offset = 0;
             self.position_frames = target;
         }
-        Ok(self.position_frames)
+        Ok(SeekOutcome::Complete(self.position_frames))
     }
 }
 
@@ -711,17 +810,33 @@ impl SeekableDecoder for FlacDecoder {
     }
 }
 
-fn skip_frames<D: SeekableDecoder>(decoder: &mut D, target: u64) -> Result<(), String> {
+fn skip_frames<D: SeekableDecoder>(
+    decoder: &mut D,
+    target: u64,
+    should_cancel: &mut dyn FnMut() -> bool,
+) -> Result<bool, String> {
     let channels = 2;
     let mut scratch = vec![0_i16; AUDIO_GRAIN * channels];
+    let mut chunks = 0_u32;
     while decoder.position_frames() < target {
+        if should_cancel() {
+            return Ok(false);
+        }
+
         let remaining = (target - decoder.position_frames()) as usize;
         let to_read = remaining.min(AUDIO_GRAIN);
         if decoder.fill_frames(&mut scratch, to_read)? == 0 {
             break;
         }
+
+        chunks += 1;
+        if chunks % 16 == 0 {
+            thread::sleep(Duration::from_millis(1));
+        } else if chunks % 4 == 0 {
+            thread::yield_now();
+        }
     }
-    Ok(())
+    Ok(true)
 }
 
 fn write_channels(out: &mut [i16], frame: usize, channels: usize, left: i16, right: i16) {
