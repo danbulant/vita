@@ -4,8 +4,8 @@ use std::time::Instant;
 
 use imgui::{Condition, MouseButton, StyleVar, Ui};
 
-use crate::audio::{is_supported_audio_file, PlaybackSnapshot};
-use crate::rendering::{SCREEN_H, SCREEN_W};
+use crate::plumbing::audio::{is_supported_audio_file, PlaybackSnapshot};
+use crate::plumbing::rendering::{SCREEN_H, SCREEN_W};
 
 const ROOT_PATH: &str = "ux0:/";
 const FILE_ROW_HEIGHT: f32 = 44.0;
