@@ -1,17 +1,18 @@
 use std::fs::File;
-use std::io::{BufReader, Read};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
 
-use claxon::frame::Block;
-use claxon::FlacReader;
-use lewton::inside_ogg::OggStreamReader;
-use minimp3_sys::{
-    mp3dec_decode_frame, mp3dec_frame_info_t, mp3dec_init, mp3dec_t, MINIMP3_MAX_SAMPLES_PER_FRAME,
-};
+use symphonia::core::audio::SampleBuffer;
+use symphonia::core::codecs::{Decoder as SymphoniaCodecDecoder, DecoderOptions, CODEC_TYPE_NULL};
+use symphonia::core::errors::Error as SymphoniaError;
+use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
+use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
+use symphonia::core::meta::MetadataOptions;
+use symphonia::core::probe::Hint;
+use symphonia::core::units::Time;
+use symphonia::default::{get_codecs, get_probe};
 use vitasdk_sys::{
     sceAppMgrAcquireBgmPort, sceAppMgrReleaseBgmPort, sceAudioOutOpenPort, sceAudioOutOutput,
     sceAudioOutReleasePort, sceAudioOutSetVolume, sceKernelPowerLock, sceKernelPowerTick,
@@ -172,7 +173,28 @@ pub fn is_supported_audio_file(path: &str) -> bool {
             .and_then(|ext| ext.to_str())
             .map(|ext| ext.to_ascii_lowercase())
             .as_deref(),
-        Some("mp3" | "flac" | "ogg")
+        Some(
+            "aac"
+                | "aif"
+                | "aiff"
+                | "alac"
+                | "caf"
+                | "flac"
+                | "m4a"
+                | "m4b"
+                | "m4p"
+                | "mka"
+                | "mkv"
+                | "mp1"
+                | "mp2"
+                | "mp3"
+                | "mp4"
+                | "mpa"
+                | "oga"
+                | "ogg"
+                | "wav"
+                | "webm",
+        )
     )
 }
 
@@ -333,70 +355,10 @@ enum SeekOutcome {
     Cancelled,
 }
 
-enum Decoder {
-    Mp3(Mp3Decoder),
-    Flac(FlacDecoder),
-    Ogg(OggDecoder),
-}
-
-impl Decoder {
-    fn open(path: &str) -> Result<Self, String> {
-        let ext = Path::new(path)
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .map(|ext| ext.to_ascii_lowercase())
-            .unwrap_or_default();
-
-        match ext.as_str() {
-            "mp3" => Mp3Decoder::open(path).map(Self::Mp3),
-            "flac" => FlacDecoder::open(path).map(Self::Flac),
-            "ogg" => OggDecoder::open(path).map(Self::Ogg),
-            _ => Err("Unsupported audio file".to_owned()),
-        }
-    }
-
-    fn info(&self) -> StreamInfo {
-        match self {
-            Self::Mp3(decoder) => decoder.info,
-            Self::Flac(decoder) => decoder.info,
-            Self::Ogg(decoder) => decoder.info,
-        }
-    }
-
-    fn position_frames(&self) -> u64 {
-        match self {
-            Self::Mp3(decoder) => decoder.position_frames,
-            Self::Flac(decoder) => decoder.position_frames,
-            Self::Ogg(decoder) => decoder.position_frames,
-        }
-    }
-
-    fn fill_frames(&mut self, out: &mut [i16], frames: usize) -> Result<usize, String> {
-        match self {
-            Self::Mp3(decoder) => decoder.fill_frames(out, frames),
-            Self::Flac(decoder) => decoder.fill_frames(out, frames),
-            Self::Ogg(decoder) => decoder.fill_frames(out, frames),
-        }
-    }
-
-    fn seek_percent(
-        &mut self,
-        path: &str,
-        percent: f32,
-        should_cancel: &mut dyn FnMut() -> bool,
-    ) -> Result<SeekOutcome, String> {
-        match self {
-            Self::Mp3(decoder) => decoder.seek_percent(path, percent, should_cancel),
-            Self::Flac(decoder) => decoder.seek_percent(path, percent, should_cancel),
-            Self::Ogg(decoder) => decoder.seek_percent(percent),
-        }
-    }
-}
-
-struct Mp3Decoder {
-    data: Vec<u8>,
-    offset: usize,
-    decoder: Box<mp3dec_t>,
+struct Decoder {
+    format: Box<dyn FormatReader>,
+    decoder: Box<dyn SymphoniaCodecDecoder>,
+    track_id: u32,
     current: Vec<i16>,
     current_channels: usize,
     current_offset: usize,
@@ -404,69 +366,103 @@ struct Mp3Decoder {
     position_frames: u64,
 }
 
-impl Mp3Decoder {
+impl Decoder {
     fn open(path: &str) -> Result<Self, String> {
-        let mut file = File::open(path).map_err(|err| err.to_string())?;
-        let file_size = file.metadata().ok().map(|meta| meta.len()).unwrap_or(0);
-        let mut data = Vec::new();
-        file.read_to_end(&mut data).map_err(|err| err.to_string())?;
+        let file = File::open(path).map_err(|err| err.to_string())?;
+        let mss = MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions::default());
 
-        let mut decoder = new_mp3_decoder();
-        let mut offset = 0;
-        let first = decode_next_mp3_frame(&data, &mut offset, &mut *decoder)?
-            .ok_or_else(|| "No MP3 frames found".to_owned())?;
+        let mut hint = Hint::new();
+        if let Some(ext) = Path::new(path).extension().and_then(|ext| ext.to_str()) {
+            hint.with_extension(ext);
+        }
 
-        let channels = first.channels.max(1).min(2) as u32;
-        let sample_rate = first.sample_rate.max(1) as u32;
-        let total_frames = if first.bitrate > 0 && file_size > 0 {
-            let seconds = file_size as f64 * 8.0 / (first.bitrate as f64 * 1000.0);
-            Some((seconds * sample_rate as f64) as u64)
-        } else {
-            None
+        let format_options = FormatOptions {
+            // Keep startup quick while allowing Symphonia to build denser seek indexes as it reads.
+            prebuild_seek_index: false,
+            seek_index_fill_rate: 2,
+            enable_gapless: true,
         };
+        let metadata_options = MetadataOptions::default();
+        let probed = get_probe()
+            .format(&hint, mss, &format_options, &metadata_options)
+            .map_err(|err| err.to_string())?;
+        let format = probed.format;
 
-        Ok(Self {
-            data,
-            offset: first.next_offset,
+        let track = format
+            .default_track()
+            .or_else(|| {
+                format
+                    .tracks()
+                    .iter()
+                    .find(|track| track.codec_params.codec != CODEC_TYPE_NULL)
+            })
+            .ok_or_else(|| "No supported audio track found".to_owned())?;
+
+        if track.codec_params.codec == CODEC_TYPE_NULL {
+            return Err("No supported audio track found".to_owned());
+        }
+
+        let track_id = track.id;
+        let codec_params = track.codec_params.clone();
+        let decoder = get_codecs()
+            .make(&codec_params, &DecoderOptions::default())
+            .map_err(|err| err.to_string())?;
+
+        let sample_rate = codec_params.sample_rate.unwrap_or(44_100).max(1);
+        let channels = codec_params
+            .channels
+            .map(|channels| channels.count() as u32)
+            .unwrap_or(2)
+            .max(1)
+            .min(2);
+
+        let mut decoder = Self {
+            format,
             decoder,
-            current: first.data,
-            current_channels: first.channels.max(1),
+            track_id,
+            current: Vec::new(),
+            current_channels: channels as usize,
             current_offset: 0,
             info: StreamInfo {
                 sample_rate,
                 channels,
-                total_frames,
+                total_frames: codec_params.n_frames,
             },
             position_frames: 0,
-        })
+        };
+
+        decoder.prime()?;
+        Ok(decoder)
+    }
+
+    fn info(&self) -> StreamInfo {
+        self.info
+    }
+
+    fn position_frames(&self) -> u64 {
+        self.position_frames
     }
 
     fn fill_frames(&mut self, out: &mut [i16], frames: usize) -> Result<usize, String> {
-        let channels = self.info.channels as usize;
+        let output_channels = self.info.channels as usize;
         let mut written_frames = 0;
 
         while written_frames < frames {
             if self.current_offset >= self.current.len() / self.current_channels {
-                if let Some(frame) =
-                    decode_next_mp3_frame(&self.data, &mut self.offset, &mut *self.decoder)?
-                {
-                    self.current = frame.data;
-                    self.current_channels = frame.channels.max(1);
-                    self.current_offset = 0;
-                } else {
+                if !self.decode_next_chunk()? {
                     break;
                 }
             }
 
-            let frame_frames = self.current.len() / self.current_channels;
-            let available = frame_frames.saturating_sub(self.current_offset);
+            let current_frames = self.current.len() / self.current_channels;
+            let available = current_frames.saturating_sub(self.current_offset);
             let to_copy = available.min(frames - written_frames);
 
             for i in 0..to_copy {
                 write_channels(
                     out,
                     written_frames + i,
-                    channels,
+                    output_channels,
                     sample_from_interleaved(
                         &self.current,
                         self.current_offset + i,
@@ -500,343 +496,111 @@ impl Mp3Decoder {
             return Ok(SeekOutcome::Complete(self.position_frames));
         };
 
+        if should_cancel() {
+            return Ok(SeekOutcome::Cancelled);
+        }
+
         let percent = percent.clamp(0.0, 1.0);
-        let target = (total_frames as f32 * percent) as u64;
-        let mut offset = (self.data.len() as f32 * percent) as usize;
-        offset = offset.min(self.data.len().saturating_sub(1));
+        let target = (total_frames as f64 * percent as f64) as u64;
+        let seconds = target / self.info.sample_rate as u64;
+        let frac = (target % self.info.sample_rate as u64) as f64 / self.info.sample_rate as f64;
+
+        let seeked = self
+            .format
+            .seek(
+                SeekMode::Accurate,
+                SeekTo::Time {
+                    time: Time::new(seconds, frac),
+                    track_id: Some(self.track_id),
+                },
+            )
+            .map_err(|err| err.to_string())?;
 
         if should_cancel() {
             return Ok(SeekOutcome::Cancelled);
         }
 
-        self.decoder = new_mp3_decoder();
+        self.decoder.reset();
         self.current.clear();
         self.current_offset = 0;
-        self.offset = offset;
-        self.position_frames = target;
+        self.position_frames = seeked.actual_ts.min(target);
 
-        if let Some(frame) =
-            decode_next_mp3_frame(&self.data, &mut self.offset, &mut *self.decoder)?
-        {
-            self.current = frame.data;
-            self.current_channels = frame.channels.max(1);
-        } else if offset > 0 {
+        // Symphonia's accurate seek lands on or before the requested packet. Decode and discard
+        // the small remainder so the UI and playback position align with the requested frame.
+        let mut scratch = vec![0_i16; AUDIO_GRAIN * self.info.channels as usize];
+        while self.position_frames < target {
             if should_cancel() {
                 return Ok(SeekOutcome::Cancelled);
             }
 
-            self.decoder = new_mp3_decoder();
-            self.offset = offset.saturating_sub(64 * 1024);
-            if let Some(frame) =
-                decode_next_mp3_frame(&self.data, &mut self.offset, &mut *self.decoder)?
-            {
-                self.current = frame.data;
-                self.current_channels = frame.channels.max(1);
+            let remaining = (target - self.position_frames) as usize;
+            let to_read = remaining.min(AUDIO_GRAIN);
+            if self.fill_frames(&mut scratch, to_read)? == 0 {
+                break;
             }
-        }
-
-        Ok(SeekOutcome::Complete(self.position_frames))
-    }
-}
-
-struct DecodedMp3Frame {
-    data: Vec<i16>,
-    sample_rate: i32,
-    channels: usize,
-    bitrate: i32,
-    next_offset: usize,
-}
-
-fn new_mp3_decoder() -> Box<mp3dec_t> {
-    let mut decoder = unsafe { Box::new(std::mem::zeroed::<mp3dec_t>()) };
-    unsafe {
-        mp3dec_init(&mut *decoder);
-    }
-    decoder
-}
-
-fn decode_next_mp3_frame(
-    data: &[u8],
-    offset: &mut usize,
-    decoder: &mut mp3dec_t,
-) -> Result<Option<DecodedMp3Frame>, String> {
-    const MP3_SCAN_WINDOW: usize = 64 * 1024;
-
-    while *offset < data.len() {
-        let available = data.len() - *offset;
-        let probe_len = available.min(MP3_SCAN_WINDOW);
-        let mut pcm = vec![0_i16; MINIMP3_MAX_SAMPLES_PER_FRAME as usize];
-        let mut info = unsafe { std::mem::zeroed::<mp3dec_frame_info_t>() };
-        let samples = unsafe {
-            mp3dec_decode_frame(
-                decoder,
-                data[*offset..*offset + probe_len].as_ptr(),
-                probe_len as i32,
-                pcm.as_mut_ptr(),
-                &mut info,
-            )
-        };
-
-        if info.frame_bytes > 0 {
-            *offset += info.frame_bytes as usize;
-        } else {
-            *offset += probe_len.min(4096).max(1);
-            continue;
-        }
-
-        if samples > 0 {
-            let channels = info.channels.max(1) as usize;
-            let len = samples as usize * channels;
-            pcm.truncate(len);
-            return Ok(Some(DecodedMp3Frame {
-                data: pcm,
-                sample_rate: info.hz,
-                channels,
-                bitrate: info.bitrate_kbps,
-                next_offset: *offset,
-            }));
-        }
-    }
-
-    Ok(None)
-}
-
-struct FlacDecoder {
-    reader: FlacReader<File>,
-    block: Option<Block>,
-    block_offset: u32,
-    info: StreamInfo,
-    position_frames: u64,
-}
-
-impl FlacDecoder {
-    fn open(path: &str) -> Result<Self, String> {
-        let reader = FlacReader::open(path).map_err(|err| err.to_string())?;
-        let streaminfo = reader.streaminfo();
-        Ok(Self {
-            reader,
-            block: None,
-            block_offset: 0,
-            info: StreamInfo {
-                sample_rate: streaminfo.sample_rate,
-                channels: (streaminfo.channels as u32).max(1).min(2),
-                total_frames: streaminfo.samples,
-            },
-            position_frames: 0,
-        })
-    }
-
-    fn fill_frames(&mut self, out: &mut [i16], frames: usize) -> Result<usize, String> {
-        let channels = self.info.channels as usize;
-        let shift = flac_shift(self.reader.streaminfo().bits_per_sample);
-        let mut written_frames = 0;
-
-        while written_frames < frames {
-            if self.block.is_none() {
-                let next = self
-                    .reader
-                    .blocks()
-                    .read_next_or_eof(Vec::new())
-                    .map_err(|err| err.to_string())?;
-                self.block = next;
-                self.block_offset = 0;
-                if self.block.is_none() {
-                    break;
-                }
-            }
-
-            let block = self.block.as_ref().unwrap();
-            let available = block.duration().saturating_sub(self.block_offset) as usize;
-            let to_copy = available.min(frames - written_frames);
-
-            for i in 0..to_copy {
-                let sample = self.block_offset + i as u32;
-                let left = scale_flac_sample(block.sample(0, sample), shift);
-                let right = if block.channels() > 1 {
-                    scale_flac_sample(block.sample(1, sample), shift)
-                } else {
-                    left
-                };
-                write_channels(out, written_frames + i, channels, left, right);
-            }
-
-            written_frames += to_copy;
-            self.block_offset += to_copy as u32;
-            self.position_frames += to_copy as u64;
-
-            if self.block_offset >= block.duration() {
-                self.block = None;
-                self.block_offset = 0;
-            }
-        }
-
-        Ok(written_frames)
-    }
-
-    fn seek_percent(
-        &mut self,
-        path: &str,
-        percent: f32,
-        should_cancel: &mut dyn FnMut() -> bool,
-    ) -> Result<SeekOutcome, String> {
-        let target = self
-            .info
-            .total_frames
-            .map(|total| (total as f32 * percent.clamp(0.0, 1.0)) as u64)
-            .unwrap_or(0);
-        *self = Self::open(path)?;
-        if !skip_frames(self, target, should_cancel)? {
-            return Ok(SeekOutcome::Cancelled);
-        }
-        Ok(SeekOutcome::Complete(self.position_frames))
-    }
-}
-
-struct OggDecoder {
-    reader: OggStreamReader<BufReader<File>>,
-    packet: Vec<i16>,
-    packet_offset: usize,
-    info: StreamInfo,
-    position_frames: u64,
-}
-
-impl OggDecoder {
-    fn open(path: &str) -> Result<Self, String> {
-        let file = File::open(path).map_err(|err| err.to_string())?;
-        let reader = OggStreamReader::new(BufReader::new(file)).map_err(|err| err.to_string())?;
-        let sample_rate = reader.ident_hdr.audio_sample_rate;
-        let channels = (reader.ident_hdr.audio_channels as u32).max(1).min(2);
-        Ok(Self {
-            reader,
-            packet: Vec::new(),
-            packet_offset: 0,
-            info: StreamInfo {
-                sample_rate,
-                channels,
-                total_frames: None,
-            },
-            position_frames: 0,
-        })
-    }
-
-    fn fill_frames(&mut self, out: &mut [i16], frames: usize) -> Result<usize, String> {
-        let channels = self.info.channels as usize;
-        let mut written_frames = 0;
-
-        while written_frames < frames {
-            if self.packet_offset >= self.packet.len() {
-                match self
-                    .reader
-                    .read_dec_packet_itl()
-                    .map_err(|err| err.to_string())?
-                {
-                    Some(packet) => {
-                        self.packet = packet;
-                        self.packet_offset = 0;
-                    }
-                    None => break,
-                }
-            }
-
-            let packet_channels = channels.max(1);
-            let available =
-                (self.packet.len().saturating_sub(self.packet_offset)) / packet_channels;
-            let to_copy = available.min(frames - written_frames);
-
-            for i in 0..to_copy {
-                write_channels(
-                    out,
-                    written_frames + i,
-                    channels,
-                    sample_from_interleaved(
-                        &self.packet,
-                        self.packet_offset / packet_channels + i,
-                        packet_channels,
-                        0,
-                    ),
-                    sample_from_interleaved(
-                        &self.packet,
-                        self.packet_offset / packet_channels + i,
-                        packet_channels,
-                        1,
-                    ),
-                );
-            }
-
-            self.packet_offset += to_copy * packet_channels;
-            written_frames += to_copy;
-            self.position_frames += to_copy as u64;
-        }
-
-        Ok(written_frames)
-    }
-
-    fn seek_percent(&mut self, percent: f32) -> Result<SeekOutcome, String> {
-        if let Some(total_frames) = self.info.total_frames {
-            let target = (total_frames as f32 * percent.clamp(0.0, 1.0)) as u64;
-            self.reader
-                .seek_absgp_pg(target)
-                .map_err(|err| err.to_string())?;
-            self.packet.clear();
-            self.packet_offset = 0;
-            self.position_frames = target;
-        }
-        Ok(SeekOutcome::Complete(self.position_frames))
-    }
-}
-
-trait SeekableDecoder {
-    fn fill_frames(&mut self, out: &mut [i16], frames: usize) -> Result<usize, String>;
-    fn position_frames(&self) -> u64;
-}
-
-impl SeekableDecoder for Mp3Decoder {
-    fn fill_frames(&mut self, out: &mut [i16], frames: usize) -> Result<usize, String> {
-        self.fill_frames(out, frames)
-    }
-
-    fn position_frames(&self) -> u64 {
-        self.position_frames
-    }
-}
-
-impl SeekableDecoder for FlacDecoder {
-    fn fill_frames(&mut self, out: &mut [i16], frames: usize) -> Result<usize, String> {
-        self.fill_frames(out, frames)
-    }
-
-    fn position_frames(&self) -> u64 {
-        self.position_frames
-    }
-}
-
-fn skip_frames<D: SeekableDecoder>(
-    decoder: &mut D,
-    target: u64,
-    should_cancel: &mut dyn FnMut() -> bool,
-) -> Result<bool, String> {
-    let channels = 2;
-    let mut scratch = vec![0_i16; AUDIO_GRAIN * channels];
-    let mut chunks = 0_u32;
-    while decoder.position_frames() < target {
-        if should_cancel() {
-            return Ok(false);
-        }
-
-        let remaining = (target - decoder.position_frames()) as usize;
-        let to_read = remaining.min(AUDIO_GRAIN);
-        if decoder.fill_frames(&mut scratch, to_read)? == 0 {
-            break;
-        }
-
-        chunks += 1;
-        if chunks % 16 == 0 {
-            thread::sleep(Duration::from_millis(1));
-        } else if chunks % 4 == 0 {
             thread::yield_now();
         }
+
+        Ok(SeekOutcome::Complete(self.position_frames))
     }
-    Ok(true)
+
+    fn prime(&mut self) -> Result<(), String> {
+        if self.decode_next_chunk()? {
+            self.info.channels = (self.current_channels as u32).max(1).min(2);
+        }
+        Ok(())
+    }
+
+    fn decode_next_chunk(&mut self) -> Result<bool, String> {
+        loop {
+            let packet = match self.format.next_packet() {
+                Ok(packet) => packet,
+                Err(SymphoniaError::IoError(err))
+                    if err.kind() == std::io::ErrorKind::UnexpectedEof =>
+                {
+                    return Ok(false)
+                }
+                Err(SymphoniaError::ResetRequired) => {
+                    return Err("Format reset required while decoding".to_owned())
+                }
+                Err(err) => return Err(err.to_string()),
+            };
+
+            if packet.track_id() != self.track_id {
+                continue;
+            }
+
+            let decoded = match self.decoder.decode(&packet) {
+                Ok(decoded) => decoded,
+                Err(SymphoniaError::DecodeError(_)) => continue,
+                Err(SymphoniaError::IoError(err))
+                    if err.kind() == std::io::ErrorKind::UnexpectedEof =>
+                {
+                    return Ok(false)
+                }
+                Err(err) => return Err(err.to_string()),
+            };
+
+            let spec = *decoded.spec();
+            let channels = spec.channels.count().max(1);
+            let mut sample_buffer = SampleBuffer::<i16>::new(decoded.capacity() as u64, spec);
+            sample_buffer.copy_interleaved_ref(decoded);
+
+            self.current.clear();
+            self.current.extend_from_slice(sample_buffer.samples());
+            self.current_channels = channels;
+            self.current_offset = 0;
+
+            if self.info.sample_rate != spec.rate {
+                self.info.sample_rate = spec.rate.max(1);
+            }
+            self.info.channels = (channels as u32).max(1).min(2);
+
+            if !self.current.is_empty() {
+                return Ok(true);
+            }
+        }
+    }
 }
 
 fn write_channels(out: &mut [i16], frame: usize, channels: usize, left: i16, right: i16) {
@@ -852,12 +616,4 @@ fn write_channels(out: &mut [i16], frame: usize, channels: usize, left: i16, rig
 fn sample_from_interleaved(data: &[i16], frame: usize, channels: usize, channel: usize) -> i16 {
     let channel = channel.min(channels.saturating_sub(1));
     data.get(frame * channels + channel).copied().unwrap_or(0)
-}
-
-fn flac_shift(bits_per_sample: u32) -> u32 {
-    bits_per_sample.saturating_sub(16)
-}
-
-fn scale_flac_sample(sample: i32, shift: u32) -> i16 {
-    (sample >> shift).clamp(i16::MIN as i32, i16::MAX as i32) as i16
 }
