@@ -7,6 +7,7 @@ use crate::library::{AlbumRow, ArtistRow, LibraryDb, RootRow, ScanProgress, Scan
 use crate::plumbing::rendering::{SCREEN_H, SCREEN_W};
 use crate::ui::components::scrollable_list::ScrollableList;
 use crate::ui::file_tree::FileTreeView;
+use crate::ui::{draw_bottom_nav, NavAction};
 
 const ROW_HEIGHT: f32 = 46.0;
 
@@ -83,11 +84,18 @@ impl LibraryView {
         }
     }
 
-    pub fn draw(&mut self, ui: &Ui) -> Option<LibraryAction> {
+    pub fn draw(
+        &mut self,
+        ui: &Ui,
+        window_title: &str,
+        show_back: bool,
+        show_player: bool,
+    ) -> (Option<LibraryAction>, Option<NavAction>) {
         self.poll_scan();
         let mut action = None;
+        let mut nav_action = None;
 
-        ui.window("Library")
+        ui.window(&format!("{window_title}###Library"))
             .position([0.0, 0.0], Condition::Always)
             .size([SCREEN_W as f32, SCREEN_H as f32], Condition::Always)
             .movable(false)
@@ -97,7 +105,7 @@ impl LibraryView {
                 ui.text(self.title());
                 ui.separator();
 
-                let list_height = SCREEN_H as f32 - 128.0;
+                let list_height = SCREEN_H as f32 - 176.0;
                 let mut list = std::mem::take(&mut self.list);
                 list.draw(ui, "library-list", [0.0, list_height], true, |ui, touch| {
                     action = self.draw_page_rows(ui, touch.disable_hover || touch.suppress_click);
@@ -105,7 +113,6 @@ impl LibraryView {
                 self.list = list;
 
                 ui.separator();
-                ui.text("Cross: open/select  Square: library home  Circle: back  Triangle: refresh  Select: quit");
                 if let Some(scan) = &self.last_scan {
                     ui.text(format!(
                         "Last scan: {} files, {} indexed, {} unchanged, {} errors",
@@ -115,9 +122,15 @@ impl LibraryView {
                 if !self.status.is_empty() {
                     ui.text(&self.status);
                 }
+
+                nav_action = draw_bottom_nav(ui, show_back, show_player);
             });
 
-        action
+        (action, nav_action)
+    }
+
+    pub fn can_go_back(&self) -> bool {
+        !matches!(self.page, LibraryPage::Home)
     }
 
     pub fn back(&mut self) -> bool {
@@ -206,7 +219,7 @@ impl LibraryView {
             if row(
                 ui,
                 &format!(
-                    "{} — {} tracks##artist-{}",
+                    "{} - {} tracks##artist-{}",
                     artist.name, artist.track_count, artist.id
                 ),
                 disable_hover,
@@ -232,7 +245,7 @@ impl LibraryView {
             if row(
                 ui,
                 &format!(
-                    "{} — {}{} — {} tracks — {}##album-{}",
+                    "{} - {}{} - {} tracks - {}##album-{}",
                     album.album_artist, album.title, year, album.track_count, art, album.id
                 ),
                 disable_hover,
@@ -266,7 +279,7 @@ impl LibraryView {
             if row(
                 ui,
                 &format!(
-                    "{}{}{} — {} — {} / {} [{}] — {}##track-{}",
+                    "{}{}{} - {} - {} / {} [{}] - {}##track-{}",
                     disc,
                     number,
                     track.title,
@@ -446,15 +459,15 @@ impl LibraryView {
     fn title(&self) -> String {
         match &self.page {
             LibraryPage::Home => "Library".to_owned(),
-            LibraryPage::Roots(roots) => format!("Library roots — {}", roots.len()),
-            LibraryPage::Artists(artists) => format!("Artists — {}", artists.len()),
-            LibraryPage::Albums(albums) => format!("Albums — {}", albums.len()),
-            LibraryPage::Tracks(tracks) => format!("Tracks — {}", tracks.len()),
+            LibraryPage::Roots(roots) => format!("Library roots - {}", roots.len()),
+            LibraryPage::Artists(artists) => format!("Artists - {}", artists.len()),
+            LibraryPage::Albums(albums) => format!("Albums - {}", albums.len()),
+            LibraryPage::Tracks(tracks) => format!("Tracks - {}", tracks.len()),
             LibraryPage::ArtistTracks { artist, tracks } => {
-                format!("{artist} — {} tracks", tracks.len())
+                format!("{artist} - {} tracks", tracks.len())
             }
             LibraryPage::AlbumTracks { album, tracks } => {
-                format!("{album} — {} tracks", tracks.len())
+                format!("{album} - {} tracks", tracks.len())
             }
         }
     }

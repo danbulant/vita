@@ -7,6 +7,7 @@ use imgui::{Condition, Ui};
 use crate::plumbing::audio::{is_supported_audio_file, PlaybackSnapshot};
 use crate::plumbing::rendering::{SCREEN_H, SCREEN_W};
 use crate::ui::components::scrollable_list::ScrollableList;
+use crate::ui::{draw_bottom_nav, NavAction};
 
 const ROOT_PATH: &str = "ux0:/";
 const FILE_ROW_HEIGHT: f32 = 44.0;
@@ -79,6 +80,10 @@ impl FileTreeView {
         &self.current_dir
     }
 
+    pub fn can_go_back(&self) -> bool {
+        self.current_dir != ROOT_PATH
+    }
+
     pub fn go_up(&mut self) {
         if self.current_dir == ROOT_PATH {
             self.status = format!("Already at {ROOT_PATH}");
@@ -94,15 +99,19 @@ impl FileTreeView {
         ui: &Ui,
         playback: Option<&PlaybackSnapshot>,
         controller_navigation_active: bool,
-    ) -> Option<FileTreeAction> {
+        window_title: &str,
+        show_back: bool,
+        show_player: bool,
+    ) -> (Option<FileTreeAction>, Option<NavAction>) {
         let mut action = None;
+        let mut nav_action = None;
 
         if controller_navigation_active && !self.selection_visible {
             self.selection_visible = true;
             self.focus_selected = true;
         }
 
-        ui.window("File browser")
+        ui.window(&format!("{window_title}###File browser"))
             .position([0.0, 0.0], Condition::Always)
             .size([SCREEN_W as f32, SCREEN_H as f32], Condition::Always)
             .movable(false)
@@ -110,13 +119,13 @@ impl FileTreeView {
             .collapsible(false)
             .build(|| {
                 ui.text(format!(
-                    "{} — {} entries",
+                    "{} - {} entries",
                     self.current_dir,
                     self.entries.len()
                 ));
                 ui.separator();
 
-                let list_height = SCREEN_H as f32 - 112.0;
+                let list_height = SCREEN_H as f32 - 160.0;
                 let mut files_list = std::mem::take(&mut self.files_list);
                 files_list.draw(ui, "files", [0.0, list_height], true, |ui, touch| {
                     if touch.touch_started {
@@ -185,7 +194,6 @@ impl FileTreeView {
                 self.files_list = files_list;
 
                 ui.separator();
-                ui.text("Cross: open/play  Square: library  Circle: up  Triangle: refresh  Select: quit");
                 if let Some(playback) = playback {
                     let state = if playback.is_playing {
                         "playing"
@@ -199,9 +207,11 @@ impl FileTreeView {
                 } else if !self.status.is_empty() {
                     ui.text(&self.status);
                 }
+
+                nav_action = draw_bottom_nav(ui, show_back, show_player);
             });
 
-        action
+        (action, nav_action)
     }
 
     fn activate_entry(&mut self, idx: usize) -> Option<FileTreeAction> {

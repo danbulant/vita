@@ -2,6 +2,7 @@ use imgui::{StyleVar, Ui};
 
 use crate::plumbing::audio::AudioPlayer;
 use crate::plumbing::rendering::{SCREEN_H, SCREEN_W};
+use crate::ui::{draw_bottom_nav, NavAction};
 pub struct PlayerView {
     error: Option<String>,
     seek_focused: bool,
@@ -19,14 +20,20 @@ impl PlayerView {
         self.seek_focused
     }
 
-    pub fn draw(&mut self, ui: &Ui, player: Option<&AudioPlayer>) {
+    pub fn draw(
+        &mut self,
+        ui: &Ui,
+        player: Option<&AudioPlayer>,
+        window_title: &str,
+        show_back: bool,
+    ) -> Option<NavAction> {
         let Some(player) = player else {
-            self.draw_empty(ui);
-            return;
+            return self.draw_empty(ui, window_title, show_back);
         };
         let snapshot = player.snapshot();
+        let mut nav_action = None;
 
-        ui.window("Now playing")
+        ui.window(&format!("{window_title}###Now playing"))
             .position([0.0, 0.0], imgui::Condition::Always)
             .size([SCREEN_W as f32, SCREEN_H as f32], imgui::Condition::Always)
             .movable(false)
@@ -35,7 +42,13 @@ impl PlayerView {
             .build(|| {
                 ui.text("Now playing");
                 ui.separator();
-                ui.text(&snapshot.name);
+                ui.text(&snapshot.metadata.title);
+                if let Some(artist) = &snapshot.metadata.artist {
+                    ui.text(format!("by {artist}"));
+                }
+                if let Some(album) = &snapshot.metadata.album {
+                    ui.text(format!("from {album}"));
+                }
                 ui.text(&snapshot.path);
                 ui.spacing();
 
@@ -87,13 +100,16 @@ impl PlayerView {
                     ui.text(format!("Error: {error}"));
                 }
 
-                ui.separator();
-                ui.text("Cross: play/pause/seek  Circle: back  Select: quit");
+                nav_action = draw_bottom_nav(ui, show_back, false);
             });
+
+        nav_action
     }
 
-    fn draw_empty(&mut self, ui: &Ui) {
-        ui.window("Now playing")
+    fn draw_empty(&mut self, ui: &Ui, window_title: &str, show_back: bool) -> Option<NavAction> {
+        let mut nav_action = None;
+
+        ui.window(&format!("{window_title}###Now playing"))
             .position([0.0, 0.0], imgui::Condition::Always)
             .size([SCREEN_W as f32, SCREEN_H as f32], imgui::Condition::Always)
             .movable(false)
@@ -104,9 +120,10 @@ impl PlayerView {
                 if let Some(error) = &self.error {
                     ui.text(format!("Error: {error}"));
                 }
-                ui.separator();
-                ui.text("Circle: back  Select: quit");
+                nav_action = draw_bottom_nav(ui, show_back, false);
             });
+
+        nav_action
     }
 }
 

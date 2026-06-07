@@ -19,7 +19,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use imgui::Ui;
-use plumbing::audio::AudioPlayer;
+use library::metadata::read_track_metadata;
+use library::{LibraryDb, TrackDisplayRow};
+use plumbing::audio::{AudioPlayer, PlaybackMetadata};
 use plumbing::input::{self, Button};
 use plumbing::rendering::{
     clear_screen, init_vitagl, present, VitaGlImguiRenderer, SCREEN_H, SCREEN_W,
@@ -27,6 +29,7 @@ use plumbing::rendering::{
 use ui::file_tree::{FileTreeAction, FileTreeView};
 use ui::library_page::{LibraryAction, LibraryView};
 use ui::player_page::PlayerView;
+use ui::NavAction;
 
 const SEEK_STEP_SECONDS: f32 = 10.0;
 
@@ -99,6 +102,23 @@ impl AppState {
         }
     }
 
+    fn can_go_back(&self) -> bool {
+        match &self.page {
+            Page::FileTree(page) => page.can_go_back(),
+            Page::Library(page) => page.can_go_back(),
+            Page::Player(_) => !self.history.is_empty(),
+        }
+    }
+
+    fn open_player(&mut self) {
+        if self.player.is_none() || matches!(self.page, Page::Player(_)) {
+            return;
+        }
+
+        let previous_page = std::mem::replace(&mut self.page, Page::Player(PlayerView::new()));
+        self.history.push(previous_page);
+    }
+
     fn seek_relative_seconds(&self, seconds: f32) {
         let Page::Player(page) = &self.page else {
             return;
@@ -113,20 +133,38 @@ impl AppState {
 
     fn draw(&mut self, ui: &Ui, controller_navigation_active: bool) {
         let playback = self.player.as_ref().map(|player| player.snapshot());
+        let window_title = playback
+            .as_ref()
+            .map(|playback| playback.name.as_str())
+            .unwrap_or("mpvrs");
+        let show_back = self.can_go_back();
+        let show_player = self.player.is_some() && !matches!(self.page, Page::Player(_));
         let mut browse_files = false;
-        let action = match &mut self.page {
-            Page::FileTree(page) => page.draw(ui, playback.as_ref(), controller_navigation_active),
-            Page::Library(page) => match page.draw(ui) {
-                Some(LibraryAction::BrowseFiles) => {
-                    browse_files = true;
-                    None
-                }
-                Some(LibraryAction::OpenAudio(path)) => Some(FileTreeAction::OpenAudio(path)),
-                None => None,
-            },
+        let (action, nav_action) = match &mut self.page {
+            Page::FileTree(page) => page.draw(
+                ui,
+                playback.as_ref(),
+                controller_navigation_active,
+                window_title,
+                show_back,
+                show_player,
+            ),
+            Page::Library(page) => {
+                let (library_action, nav_action) =
+                    page.draw(ui, window_title, show_back, show_player);
+                let action = match library_action {
+                    Some(LibraryAction::BrowseFiles) => {
+                        browse_files = true;
+                        None
+                    }
+                    Some(LibraryAction::OpenAudio(path)) => Some(FileTreeAction::OpenAudio(path)),
+                    None => None,
+                };
+                (action, nav_action)
+            }
             Page::Player(page) => {
-                page.draw(ui, self.player.as_ref());
-                None
+                let nav_action = page.draw(ui, self.player.as_ref(), window_title, show_back);
+                (None, nav_action)
             }
         };
 
@@ -135,13 +173,22 @@ impl AppState {
             return;
         }
 
+        if let Some(nav_action) = nav_action {
+            match nav_action {
+                NavAction::Back => self.back(),
+                NavAction::OpenPlayer => self.open_player(),
+            }
+            return;
+        }
+
         if let Some(FileTreeAction::OpenAudio(path)) = action {
             let mut previous_page =
                 std::mem::replace(&mut self.page, Page::Player(PlayerView::new()));
 
             self.player = None;
+            let metadata = playback_metadata_for_path(&path);
 
-            match AudioPlayer::open(path) {
+            match AudioPlayer::open_with_metadata(path, metadata) {
                 Ok(player) => {
                     self.player = Some(player);
                     self.history.push(previous_page);
@@ -161,6 +208,25 @@ impl AppState {
             }
         }
     }
+}
+
+fn playback_metadata_for_path(path: &str) -> PlaybackMetadata {
+    if let Ok(db) = LibraryDb::open_default() {
+        if let Ok(Some(row)) = db.track_display_by_path(path) {
+            return playback_metadata_from_db_row(row);
+        }
+    }
+
+    if let Ok(metadata) = read_track_metadata(path) {
+        let title = metadata.title.unwrap_or(metadata.filename);
+        return PlaybackMetadata::new(title, Some(metadata.track_artist), metadata.album);
+    }
+
+    PlaybackMetadata::from_path(path)
+}
+
+fn playback_metadata_from_db_row(row: TrackDisplayRow) -> PlaybackMetadata {
+    PlaybackMetadata::new(row.title, row.track_artist, row.album)
 }
 
 fn main() {

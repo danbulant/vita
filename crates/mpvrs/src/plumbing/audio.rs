@@ -24,10 +24,57 @@ use vitasdk_sys::{
 const AUDIO_GRAIN: usize = 960;
 const VITA_VOLUME_MAX: i32 = 0x8000;
 
+fn clean_display_part(value: &str) -> Option<String> {
+    let value = value.trim().trim_matches('\0').trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_owned())
+    }
+}
+
+fn is_unknown_artist(value: &str) -> bool {
+    value.eq_ignore_ascii_case("unknown artist")
+}
+
+#[derive(Clone, Debug)]
+pub struct PlaybackMetadata {
+    pub title: String,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+}
+
+impl PlaybackMetadata {
+    pub fn new(title: String, artist: Option<String>, album: Option<String>) -> Self {
+        Self {
+            title: clean_display_part(&title).unwrap_or(title),
+            artist: artist.and_then(|value| clean_display_part(&value)),
+            album: album.and_then(|value| clean_display_part(&value)),
+        }
+    }
+
+    pub fn from_path(path: &str) -> Self {
+        let title = Path::new(path)
+            .file_stem()
+            .or_else(|| Path::new(path).file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.to_owned());
+        Self::new(title, None, None)
+    }
+
+    pub fn display_title(&self) -> String {
+        match self.artist.as_deref() {
+            Some(artist) if !is_unknown_artist(artist) => format!("{artist} - {}", self.title),
+            _ => self.title.clone(),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct PlaybackSnapshot {
     pub path: String,
     pub name: String,
+    pub metadata: PlaybackMetadata,
     pub is_playing: bool,
     pub position_seconds: f32,
     pub duration_seconds: Option<f32>,
@@ -37,7 +84,7 @@ pub struct PlaybackSnapshot {
 #[derive(Clone, Debug)]
 struct SharedState {
     path: String,
-    name: String,
+    metadata: PlaybackMetadata,
     is_playing: bool,
     position_frames: u64,
     total_frames: Option<u64>,
@@ -50,7 +97,8 @@ impl SharedState {
         let sample_rate = self.sample_rate.max(1) as f32;
         PlaybackSnapshot {
             path: self.path.clone(),
-            name: self.name.clone(),
+            name: self.metadata.display_title(),
+            metadata: self.metadata.clone(),
             is_playing: self.is_playing,
             position_seconds: self.position_frames as f32 / sample_rate,
             duration_seconds: self.total_frames.map(|frames| frames as f32 / sample_rate),
@@ -73,22 +121,17 @@ pub struct AudioPlayer {
 }
 
 impl AudioPlayer {
-    pub fn open(path: String) -> Result<Self, String> {
+    pub fn open_with_metadata(path: String, metadata: PlaybackMetadata) -> Result<Self, String> {
         if !is_supported_audio_file(&path) {
             return Err("Unsupported audio file".to_owned());
         }
-
-        let name = Path::new(&path)
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.clone());
 
         let mut decoder = Decoder::open(&path)?;
         let info = decoder.info();
 
         let state = Arc::new(Mutex::new(SharedState {
             path: path.clone(),
-            name,
+            metadata,
             is_playing: true,
             position_frames: 0,
             total_frames: info.total_frames,

@@ -4,7 +4,7 @@ pub mod log;
 pub mod metadata;
 pub mod scan;
 
-pub use db::{AlbumRow, ArtistRow, LibraryDb, RootRow, TrackRow};
+pub use db::{AlbumRow, ArtistRow, LibraryDb, RootRow, TrackDisplayRow, TrackRow};
 pub use scan::{ScanProgress, Scanner};
 
 pub const DATA_DIR: &str = "ux0:data/mpvrs";

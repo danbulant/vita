@@ -46,6 +46,13 @@ pub struct TrackRow {
     pub art_path: Option<String>,
 }
 
+#[derive(Clone, Debug)]
+pub struct TrackDisplayRow {
+    pub title: String,
+    pub track_artist: Option<String>,
+    pub album: Option<String>,
+}
+
 pub struct LibraryDb {
     conn: Connection,
 }
@@ -279,6 +286,25 @@ impl LibraryDb {
                       COALESCE(tracks.track_number, 9999), tracks.filename",
             params![artist_id],
         )
+    }
+
+    pub fn track_display_by_path(&self, path: &str) -> Result<Option<TrackDisplayRow>, String> {
+        self.conn
+            .query_row(
+                "SELECT COALESCE(title, filename), track_artist, album
+                 FROM tracks
+                 WHERE path = ?1 AND missing = 0",
+                params![path],
+                |row| {
+                    Ok(TrackDisplayRow {
+                        title: row.get(0)?,
+                        track_artist: row.get(1)?,
+                        album: row.get(2)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|err| err.to_string())
     }
 
     fn query_tracks<P>(&self, sql: &str, params: P) -> Result<Vec<TrackRow>, String>
