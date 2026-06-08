@@ -1,5 +1,6 @@
 use imgui::{StyleVar, Ui};
 
+use crate::library::metadata::split_artist_value;
 use crate::plumbing::audio::AudioPlayer;
 use crate::plumbing::rendering::{
     create_rgba_texture, delete_texture, GlTexture, SCREEN_H, SCREEN_W,
@@ -81,7 +82,18 @@ impl PlayerView {
                     .build(|| {
                         ui.text(&snapshot.metadata.title);
                         if let Some(artist) = &snapshot.metadata.artist {
-                            if ui
+                            let artists = split_artist_value(artist);
+                            if artists.len() > 1 {
+                                ui.text("Artists");
+                                for artist in artists {
+                                    if ui
+                                        .selectable_config(&format!("{artist}##artist-link"))
+                                        .build()
+                                    {
+                                        nav_action = Some(NavAction::OpenArtist(artist));
+                                    }
+                                }
+                            } else if ui
                                 .selectable_config(&format!("{artist}##artist-link"))
                                 .build()
                             {

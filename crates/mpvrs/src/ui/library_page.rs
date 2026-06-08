@@ -4,6 +4,7 @@ use std::thread::{self, JoinHandle};
 use imgui::{Condition, Ui};
 
 use crate::library::db::normalize_root;
+use crate::library::metadata::split_artist_value;
 use crate::library::{AlbumRow, ArtistRow, LibraryDb, RootRow, ScanProgress, Scanner, TrackRow};
 use crate::plumbing::audio::PlaybackMetadata;
 use crate::plumbing::rendering::{SCREEN_H, SCREEN_W};
@@ -196,20 +197,45 @@ impl LibraryView {
         let Some(db) = &self.db else {
             return;
         };
-        let artist = match db.artists() {
-            Ok(artists) => artists
-                .into_iter()
-                .find(|artist| artist.name.eq_ignore_ascii_case(artist_name)),
+        let artists = match db.artists() {
+            Ok(artists) => artists,
             Err(err) => {
                 self.status = format!("Failed to load artists: {err}");
                 return;
             }
         };
 
-        if let Some(artist) = artist {
-            self.load_artist_tracks(artist.id, artist.name);
-        } else {
-            self.status = format!("Artist not found in library: {artist_name}");
+        if let Some(artist) = artists
+            .iter()
+            .find(|artist| artist.name.eq_ignore_ascii_case(artist_name))
+        {
+            self.load_artist_tracks(artist.id, artist.name.clone());
+            return;
+        }
+
+        let candidates = split_artist_value(artist_name);
+        let matches: Vec<_> = candidates
+            .iter()
+            .filter_map(|candidate| {
+                artists
+                    .iter()
+                    .find(|artist| artist.name.eq_ignore_ascii_case(candidate))
+            })
+            .collect();
+
+        match matches.as_slice() {
+            [artist] => self.load_artist_tracks(artist.id, artist.name.clone()),
+            [] => self.status = format!("Artist not found in library: {artist_name}"),
+            _ => {
+                self.status = format!(
+                    "Multiple artists found: {}",
+                    matches
+                        .iter()
+                        .map(|artist| artist.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
         }
     }
 

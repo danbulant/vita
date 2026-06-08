@@ -244,10 +244,11 @@ fn merge_unmapped_tag(tags: &mut Tags, tag: &Tag, value: String) {
     let key = tag.key.to_ascii_lowercase().replace([' ', '-', '_'], "");
     match key.as_str() {
         "title" => set_once(&mut tags.title, value),
-        "artist" | "artists" | "artistsort" => push_artist_value(&mut tags.artists, &value),
-        "albumartist" | "albumartists" | "albumartistsort" | "band" => {
+        "artist" | "artists" => push_artist_value(&mut tags.artists, &value),
+        "albumartist" | "albumartists" | "band" => {
             push_artist_value(&mut tags.album_artists, &value)
         }
+        "artistsort" | "albumartistsort" => {}
         "album" => set_once(&mut tags.album, value),
         "genre" => set_once(&mut tags.genre, value),
         "date" | "year" => {
@@ -297,24 +298,66 @@ fn join_artists(artists: &[String]) -> Option<String> {
     }
 }
 
-fn split_artist_value(value: &str) -> Vec<String> {
+pub fn split_artist_value(value: &str) -> Vec<String> {
     let mut text = value.trim().to_owned();
     for delimiter in [" featuring ", " feat. ", " feat ", " ft. ", " ft ", " & "] {
         text = replace_ascii_case_insensitive(&text, delimiter, ",");
     }
 
+    let parts: Vec<String> = text
+        .split([',', ';'])
+        .filter_map(|part| {
+            let artist = part.trim().trim_matches('\0').trim();
+            (!artist.is_empty()).then(|| artist.to_owned())
+        })
+        .collect();
+    dedupe_artist_sort_fragments(parts)
+}
+
+fn dedupe_artist_sort_fragments(parts: Vec<String>) -> Vec<String> {
     let mut artists = Vec::new();
-    for part in text.split([',', ';']) {
-        let artist = part.trim().trim_matches('\0').trim();
-        if !artist.is_empty()
-            && !artists
-                .iter()
-                .any(|existing: &String| existing.eq_ignore_ascii_case(artist))
+    let mut index = 0;
+    while index < parts.len() {
+        if index + 2 < parts.len()
+            && normalize_artist_name(&parts[index])
+                == normalize_artist_name(&format!("{} {}", parts[index + 2], parts[index + 1]))
         {
-            artists.push(artist.to_owned());
+            push_unique_artist(&mut artists, parts[index].clone());
+            index += 3;
+            continue;
         }
+
+        if index + 1 < parts.len()
+            && artists.iter().any(|existing| {
+                normalize_artist_name(existing)
+                    == normalize_artist_name(&format!("{} {}", parts[index + 1], parts[index]))
+            })
+        {
+            index += 2;
+            continue;
+        }
+
+        push_unique_artist(&mut artists, parts[index].clone());
+        index += 1;
     }
     artists
+}
+
+fn push_unique_artist(artists: &mut Vec<String>, artist: String) {
+    if !artists
+        .iter()
+        .any(|existing| existing.eq_ignore_ascii_case(&artist))
+    {
+        artists.push(artist);
+    }
+}
+
+fn normalize_artist_name(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
 }
 
 fn replace_ascii_case_insensitive(value: &str, needle: &str, replacement: &str) -> String {
