@@ -14,6 +14,7 @@ use crate::plumbing::ime;
 use crate::plumbing::rendering::{SCREEN_H, SCREEN_W};
 use crate::queue::{QueueItem, QueueSource};
 use crate::ui::components::cover_art::{draw_thumbnail_cover_art_at, CoverArtCache};
+use crate::ui::components::library_home::{draw_library_home, LibraryHomeAction};
 use crate::ui::components::scrollable_list::ScrollableList;
 use crate::ui::file_tree::FileTreeView;
 use crate::ui::{draw_bottom_nav, NavAction};
@@ -369,30 +370,32 @@ impl LibraryView {
     }
 
     fn draw_home(&mut self, ui: &Ui, disable_hover: bool) -> Option<LibraryAction> {
-        if row(ui, "Artists", disable_hover) {
-            self.clear_search();
-            self.load_artists();
-        }
-        if row(ui, "Albums", disable_hover) {
-            self.clear_search();
-            self.load_albums();
-        }
-        if row(ui, "Tracks", disable_hover) {
-            self.clear_search();
-            self.load_tracks();
-        }
-        if row(ui, "Roots", disable_hover) {
-            self.load_roots();
-        }
-        if row(ui, "Browse files", disable_hover) {
-            return Some(LibraryAction::BrowseFiles);
-        }
-        if self.show_current_folder_action {
-            ui.separator();
-            if row(ui, &self.current_folder_action_label(), disable_hover) {
-                self.start_scan(self.current_folder.clone());
+        let current_folder_action_label = self
+            .show_current_folder_action
+            .then(|| self.current_folder_action_label());
+        let action = draw_library_home(ui, disable_hover, current_folder_action_label.as_deref());
+
+        match action {
+            Some(LibraryHomeAction::Artists) => {
+                self.clear_search();
+                self.load_artists();
             }
+            Some(LibraryHomeAction::Albums) => {
+                self.clear_search();
+                self.load_albums();
+            }
+            Some(LibraryHomeAction::Tracks) => {
+                self.clear_search();
+                self.load_tracks();
+            }
+            Some(LibraryHomeAction::Roots) => self.load_roots(),
+            Some(LibraryHomeAction::BrowseFiles) => return Some(LibraryAction::BrowseFiles),
+            Some(LibraryHomeAction::ScanCurrentFolder) => {
+                self.start_scan(self.current_folder.clone())
+            }
+            None => {}
         }
+
         None
     }
 
