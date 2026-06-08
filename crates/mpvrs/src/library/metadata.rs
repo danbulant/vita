@@ -19,7 +19,9 @@ pub struct TrackMetadata {
     pub filename: String,
     pub title: Option<String>,
     pub track_artist: String,
+    pub track_artists: Vec<String>,
     pub album_artist: Option<String>,
+    pub album_artists: Vec<String>,
     pub album: Option<String>,
     pub genre: Option<String>,
     pub disc_number: Option<u32>,
@@ -41,8 +43,8 @@ pub struct TrackMetadata {
 #[derive(Default)]
 struct Tags {
     title: Option<String>,
-    artist: Option<String>,
-    album_artist: Option<String>,
+    artists: Vec<String>,
+    album_artists: Vec<String>,
     album: Option<String>,
     genre: Option<String>,
     disc_number: Option<u32>,
@@ -135,10 +137,13 @@ pub fn read_track_metadata(path: &str) -> Result<TrackMetadata, String> {
         .title
         .or_else(|| Some(strip_track_prefix(&fallback_title)));
     let album = tags.album.or(fallback_album);
-    let track_artist = tags
-        .artist
-        .or_else(|| tags.album_artist.clone())
-        .unwrap_or_else(|| "Unknown Artist".to_owned());
+    let album_artist = join_artists(&tags.album_artists);
+    let track_artists = if tags.artists.is_empty() {
+        tags.album_artists.clone()
+    } else {
+        tags.artists.clone()
+    };
+    let track_artist = join_artists(&track_artists).unwrap_or_else(|| "Unknown Artist".to_owned());
     let artwork = tags.artwork.or_else(|| find_folder_art(path));
 
     Ok(TrackMetadata {
@@ -147,7 +152,9 @@ pub fn read_track_metadata(path: &str) -> Result<TrackMetadata, String> {
         filename,
         title,
         track_artist,
-        album_artist: tags.album_artist,
+        track_artists,
+        album_artist,
+        album_artists: tags.album_artists,
         album,
         genre: tags.genre,
         disc_number: tags.disc_number,
@@ -207,8 +214,8 @@ fn merge_tag(tags: &mut Tags, tag: &Tag) {
 
     match tag.std_key {
         Some(StandardTagKey::TrackTitle) => set_once(&mut tags.title, value),
-        Some(StandardTagKey::Artist) => set_once(&mut tags.artist, value),
-        Some(StandardTagKey::AlbumArtist) => set_once(&mut tags.album_artist, value),
+        Some(StandardTagKey::Artist) => push_artist_value(&mut tags.artists, &value),
+        Some(StandardTagKey::AlbumArtist) => push_artist_value(&mut tags.album_artists, &value),
         Some(StandardTagKey::Album) => set_once(&mut tags.album, value),
         Some(StandardTagKey::Genre) => set_once(&mut tags.genre, value),
         Some(StandardTagKey::Date | StandardTagKey::ReleaseDate | StandardTagKey::OriginalDate) => {
@@ -237,8 +244,10 @@ fn merge_unmapped_tag(tags: &mut Tags, tag: &Tag, value: String) {
     let key = tag.key.to_ascii_lowercase().replace([' ', '-', '_'], "");
     match key.as_str() {
         "title" => set_once(&mut tags.title, value),
-        "artist" | "albumartistssort" => set_once(&mut tags.artist, value),
-        "albumartist" | "albumartists" | "band" => set_once(&mut tags.album_artist, value),
+        "artist" | "artists" | "artistsort" => push_artist_value(&mut tags.artists, &value),
+        "albumartist" | "albumartists" | "albumartistsort" | "band" => {
+            push_artist_value(&mut tags.album_artists, &value)
+        }
         "album" => set_once(&mut tags.album, value),
         "genre" => set_once(&mut tags.genre, value),
         "date" | "year" => {
@@ -267,6 +276,65 @@ fn set_once(slot: &mut Option<String>, value: String) {
     if slot.is_none() {
         *slot = Some(value);
     }
+}
+
+fn push_artist_value(artists: &mut Vec<String>, value: &str) {
+    for artist in split_artist_value(value) {
+        if !artists
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(&artist))
+        {
+            artists.push(artist);
+        }
+    }
+}
+
+fn join_artists(artists: &[String]) -> Option<String> {
+    if artists.is_empty() {
+        None
+    } else {
+        Some(artists.join(", "))
+    }
+}
+
+fn split_artist_value(value: &str) -> Vec<String> {
+    let mut text = value.trim().to_owned();
+    for delimiter in [" featuring ", " feat. ", " feat ", " ft. ", " ft ", " & "] {
+        text = replace_ascii_case_insensitive(&text, delimiter, ",");
+    }
+
+    let mut artists = Vec::new();
+    for part in text.split([',', ';']) {
+        let artist = part.trim().trim_matches('\0').trim();
+        if !artist.is_empty()
+            && !artists
+                .iter()
+                .any(|existing: &String| existing.eq_ignore_ascii_case(artist))
+        {
+            artists.push(artist.to_owned());
+        }
+    }
+    artists
+}
+
+fn replace_ascii_case_insensitive(value: &str, needle: &str, replacement: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut index = 0;
+    while index < value.len() {
+        if value[index..]
+            .get(..needle.len())
+            .is_some_and(|part| part.eq_ignore_ascii_case(needle))
+        {
+            out.push_str(replacement);
+            index += needle.len();
+        } else if let Some(ch) = value[index..].chars().next() {
+            out.push(ch);
+            index += ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    out
 }
 
 fn clean_tag_value(value: &Value) -> String {
@@ -344,5 +412,45 @@ fn strip_track_prefix(value: &str) -> String {
         value.to_owned()
     } else {
         rest.to_owned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_artist_value;
+
+    #[test]
+    fn splits_common_multi_artist_formats() {
+        let cases = [
+            (
+                "Porter Robinson & Riot Games",
+                vec!["Porter Robinson", "Riot Games"],
+            ),
+            (
+                "Porter Robinson feat. Amy Millan",
+                vec!["Porter Robinson", "Amy Millan"],
+            ),
+            (
+                "Porter Robinson, Amy Millan, ODESZA",
+                vec!["Porter Robinson", "Amy Millan", "ODESZA"],
+            ),
+            (
+                "Raja Kumari & Stefflon Don feat. Jarina De Marco",
+                vec!["Raja Kumari", "Stefflon Don", "Jarina De Marco"],
+            ),
+            ("Secondcity ft. Ali Love", vec!["Secondcity", "Ali Love"]),
+        ];
+
+        for (input, expected) in cases {
+            assert_eq!(split_artist_value(input), expected);
+        }
+    }
+
+    #[test]
+    fn deduplicates_artists_case_insensitively() {
+        assert_eq!(
+            split_artist_value("Porter Robinson, porter robinson & Riot Games"),
+            vec!["Porter Robinson", "Riot Games"]
+        );
     }
 }

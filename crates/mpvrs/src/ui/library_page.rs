@@ -1,3 +1,4 @@
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
 use imgui::{Condition, Ui};
@@ -29,6 +30,7 @@ pub struct LibraryView {
     show_current_folder_action: bool,
     list: ScrollableList,
     scan: Option<JoinHandle<ScanProgress>>,
+    scan_progress: Option<Arc<Mutex<ScanProgress>>>,
     last_scan: Option<ScanProgress>,
 }
 
@@ -90,6 +92,7 @@ impl LibraryView {
             show_current_folder_action,
             list: ScrollableList::new(),
             scan: None,
+            scan_progress: None,
             last_scan: None,
         };
         view.open_db();
@@ -152,8 +155,12 @@ impl LibraryView {
                 ui.separator();
                 if let Some(scan) = &self.last_scan {
                     ui.text(format!(
-                        "Last scan: {} files, {} indexed, {} unchanged, {} errors",
-                        scan.files_seen, scan.tracks_indexed, scan.tracks_skipped, scan.errors
+                        "Last scan: {} files, {} indexed, {} unchanged, {} duplicates, {} errors",
+                        scan.files_seen,
+                        scan.tracks_indexed,
+                        scan.tracks_skipped,
+                        scan.tracks_duplicated,
+                        scan.errors
                     ));
                 }
                 if !self.status.is_empty() {
@@ -241,7 +248,7 @@ impl LibraryView {
         let pending = match &self.page {
             LibraryPage::Home => unreachable!(),
             LibraryPage::Roots(roots) => draw_roots(ui, disable_hover, roots),
-            LibraryPage::Artists(artists) => draw_artists(ui, disable_hover, artists),
+            LibraryPage::Artists(artists) => draw_artists(ui, disable_hover, artists, cover_cache),
             LibraryPage::Albums(albums) => draw_albums(ui, disable_hover, albums, cover_cache),
             LibraryPage::Tracks(tracks) => draw_tracks(
                 ui,
@@ -363,8 +370,10 @@ impl LibraryView {
             return;
         }
         self.status = format!("Started scanning {root}");
+        let scan_progress = Arc::new(Mutex::new(ScanProgress::default()));
+        self.scan_progress = Some(scan_progress.clone());
         self.scan = Some(thread::spawn(move || match Scanner::new() {
-            Ok(scanner) => scanner.scan_root(root),
+            Ok(scanner) => scanner.scan_root_with_progress(root, scan_progress),
             Err(err) => ScanProgress {
                 done: true,
                 errors: 1,
@@ -383,13 +392,25 @@ impl LibraryView {
                 Ok(progress) => {
                     self.status = progress.status.clone();
                     self.last_scan = Some(progress);
+                    self.scan_progress = None;
                     self.open_db();
                     self.refresh_after_scan();
                 }
-                Err(_) => self.status = "Scanner panicked".to_owned(),
+                Err(_) => {
+                    self.status = "Scanner panicked".to_owned();
+                    self.scan_progress = None;
+                }
             }
         } else {
-            self.status = "Scan running in background...".to_owned();
+            if let Some(progress) = self
+                .scan_progress
+                .as_ref()
+                .and_then(|progress| progress.lock().ok().map(|progress| progress.clone()))
+            {
+                if !progress.status.is_empty() {
+                    self.status = progress.status;
+                }
+            }
             self.scan = Some(handle);
         }
     }
@@ -515,22 +536,28 @@ fn draw_artists(
     ui: &Ui,
     disable_hover: bool,
     artists: &[ArtistRow],
+    cover_cache: &mut CoverArtCache,
 ) -> Option<PendingLibraryAction> {
-    for artist in artists {
-        if row(
-            ui,
-            &format!(
-                "{} - {} tracks##artist-{}",
-                artist.name, artist.track_count, artist.id
-            ),
-            disable_hover,
-        ) {
+    let (start, end, top_skip, bottom_skip) =
+        visible_row_range(ui, artists.len(), ALBUM_ROW_HEIGHT, ALBUM_ROW_SPACING);
+
+    if top_skip > 0.0 {
+        ui.dummy([0.0, top_skip]);
+    }
+
+    for artist in &artists[start..end] {
+        if artist_row(ui, artist, disable_hover, cover_cache) {
             return Some(PendingLibraryAction::LoadArtistTracks {
                 id: artist.id,
                 name: artist.name.clone(),
             });
         }
     }
+
+    if bottom_skip > 0.0 {
+        ui.dummy([0.0, bottom_skip]);
+    }
+
     None
 }
 
@@ -637,6 +664,47 @@ fn visible_row_range(
     (start, end, top_skip, bottom_skip)
 }
 
+fn artist_row(
+    ui: &Ui,
+    artist: &ArtistRow,
+    disable_hover: bool,
+    cover_cache: &mut CoverArtCache,
+) -> bool {
+    let clicked = ui
+        .selectable_config(&format!("##artist-{}", artist.id))
+        .disabled(disable_hover)
+        .size([0.0, ALBUM_ROW_HEIGHT])
+        .build();
+
+    let min = ui.item_rect_min();
+    let max = ui.item_rect_max();
+    let row_height = max[1] - min[1];
+    let art_x = min[0] + 6.0;
+    let art_y = min[1] + (row_height - ALBUM_ART_SIZE) * 0.5;
+    draw_thumbnail_cover_art_at(
+        ui,
+        cover_cache,
+        artist.art_path.as_deref(),
+        !disable_hover,
+        [art_x, art_y],
+        [ALBUM_ART_SIZE, ALBUM_ART_SIZE],
+    );
+
+    let detail = format!(
+        "{} - {}",
+        format_album_count(artist.album_count),
+        format_track_count(artist.track_count)
+    );
+    let text_x = art_x + ALBUM_ART_SIZE + 12.0;
+    let title_y = min[1] + 9.0;
+    let detail_y = min[1] + 35.0;
+    let draw_list = ui.get_window_draw_list();
+    draw_list.add_text([text_x, title_y], [0.94, 0.96, 1.0, 1.0], &artist.name);
+    draw_list.add_text([text_x, detail_y], [0.66, 0.72, 0.82, 1.0], detail);
+
+    clicked
+}
+
 fn album_row(
     ui: &Ui,
     album: &AlbumRow,
@@ -736,6 +804,14 @@ fn format_track_count(track_count: i64) -> String {
         "1 track".to_owned()
     } else {
         format!("{track_count} tracks")
+    }
+}
+
+fn format_album_count(album_count: i64) -> String {
+    if album_count == 1 {
+        "1 album".to_owned()
+    } else {
+        format!("{album_count} albums")
     }
 }
 

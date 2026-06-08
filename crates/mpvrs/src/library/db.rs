@@ -19,7 +19,9 @@ pub struct RootRow {
 pub struct ArtistRow {
     pub id: i64,
     pub name: String,
+    pub art_path: Option<String>,
     pub track_count: i64,
+    pub album_count: i64,
 }
 
 #[derive(Clone, Debug)]
@@ -109,7 +111,10 @@ impl LibraryDb {
                 CREATE TABLE IF NOT EXISTS artists (
                     id INTEGER PRIMARY KEY,
                     name TEXT NOT NULL,
-                    sort_name TEXT NOT NULL UNIQUE
+                    sort_name TEXT NOT NULL UNIQUE,
+                    art_path TEXT,
+                    track_count INTEGER NOT NULL DEFAULT 0,
+                    album_count INTEGER NOT NULL DEFAULT 0
                 );
 
                 CREATE TABLE IF NOT EXISTS tracks (
@@ -139,6 +144,8 @@ impl LibraryDb {
                     art_id INTEGER,
                     indexed_at INTEGER NOT NULL,
                     missing INTEGER NOT NULL DEFAULT 0,
+                    song_key TEXT,
+                    duplicate_of INTEGER,
                     FOREIGN KEY(album_id) REFERENCES albums(id),
                     FOREIGN KEY(art_id) REFERENCES artwork(id)
                 );
@@ -157,11 +164,111 @@ impl LibraryDb {
                 CREATE INDEX IF NOT EXISTS idx_tracks_album_artist ON tracks(album_artist);
                 CREATE INDEX IF NOT EXISTS idx_tracks_title ON tracks(title);
                 CREATE INDEX IF NOT EXISTS idx_tracks_parent_dir ON tracks(parent_dir);
+                CREATE INDEX IF NOT EXISTS idx_tracks_visible_album ON tracks(missing, duplicate_of, album_id);
+                CREATE INDEX IF NOT EXISTS idx_track_artists_artist_track ON track_artists(artist_id, track_id);
                 CREATE INDEX IF NOT EXISTS idx_albums_artist_title ON albums(sort_album_artist, sort_title);
                 CREATE INDEX IF NOT EXISTS idx_artists_sort_name ON artists(sort_name);
                 ",
             )
-            .map_err(|err| err.to_string())
+            .map_err(|err| err.to_string())?;
+        self.ensure_tracks_dedupe_columns()?;
+        self.ensure_artist_stats_columns()?;
+        self.conn
+            .execute_batch(
+                "
+                CREATE INDEX IF NOT EXISTS idx_tracks_song_key ON tracks(song_key);
+                CREATE INDEX IF NOT EXISTS idx_tracks_duplicate_of ON tracks(duplicate_of);
+                ",
+            )
+            .map_err(|err| err.to_string())?;
+        self.refresh_artist_stats_if_needed()?;
+        Ok(())
+    }
+
+    fn ensure_tracks_dedupe_columns(&self) -> Result<(), String> {
+        if !self.tracks_has_column("song_key")? {
+            self.conn
+                .execute("ALTER TABLE tracks ADD COLUMN song_key TEXT", [])
+                .map_err(|err| err.to_string())?;
+        }
+        if !self.tracks_has_column("duplicate_of")? {
+            self.conn
+                .execute("ALTER TABLE tracks ADD COLUMN duplicate_of INTEGER", [])
+                .map_err(|err| err.to_string())?;
+        }
+        Ok(())
+    }
+
+    fn refresh_artist_stats_if_needed(&self) -> Result<(), String> {
+        let populated_artists = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM artists WHERE track_count > 0",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|err| err.to_string())?;
+        if populated_artists > 0 {
+            return Ok(());
+        }
+
+        let visible_tracks = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM tracks WHERE missing = 0 AND duplicate_of IS NULL",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|err| err.to_string())?;
+        if visible_tracks > 0 {
+            self.refresh_artist_stats()?;
+        }
+        Ok(())
+    }
+
+    fn ensure_artist_stats_columns(&self) -> Result<(), String> {
+        if !self.table_has_column("artists", "art_path")? {
+            self.conn
+                .execute("ALTER TABLE artists ADD COLUMN art_path TEXT", [])
+                .map_err(|err| err.to_string())?;
+        }
+        if !self.table_has_column("artists", "track_count")? {
+            self.conn
+                .execute(
+                    "ALTER TABLE artists ADD COLUMN track_count INTEGER NOT NULL DEFAULT 0",
+                    [],
+                )
+                .map_err(|err| err.to_string())?;
+        }
+        if !self.table_has_column("artists", "album_count")? {
+            self.conn
+                .execute(
+                    "ALTER TABLE artists ADD COLUMN album_count INTEGER NOT NULL DEFAULT 0",
+                    [],
+                )
+                .map_err(|err| err.to_string())?;
+        }
+        Ok(())
+    }
+
+    fn tracks_has_column(&self, column: &str) -> Result<bool, String> {
+        self.table_has_column("tracks", column)
+    }
+
+    fn table_has_column(&self, table: &str, column: &str) -> Result<bool, String> {
+        let mut stmt = self
+            .conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .map_err(|err| err.to_string())?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|err| err.to_string())?;
+        for name in rows {
+            if name.map_err(|err| err.to_string())? == column {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     pub fn add_root(&self, path: &str) -> Result<(), String> {
@@ -197,12 +304,10 @@ impl LibraryDb {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT artists.id, artists.name, COUNT(DISTINCT tracks.id) AS track_count
+                "SELECT artists.id, artists.name, artists.art_path,
+                        artists.track_count, artists.album_count
                  FROM artists
-                 JOIN track_artists ON track_artists.artist_id = artists.id
-                 JOIN tracks ON tracks.id = track_artists.track_id
-                 WHERE tracks.missing = 0
-                 GROUP BY artists.id
+                 WHERE artists.track_count > 0
                  ORDER BY artists.sort_name",
             )
             .map_err(|err| err.to_string())?;
@@ -211,7 +316,9 @@ impl LibraryDb {
                 Ok(ArtistRow {
                     id: row.get(0)?,
                     name: row.get(1)?,
-                    track_count: row.get(2)?,
+                    art_path: row.get(2)?,
+                    track_count: row.get(3)?,
+                    album_count: row.get(4)?,
                 })
             })
             .map_err(|err| err.to_string())?;
@@ -226,7 +333,7 @@ impl LibraryDb {
                         COUNT(tracks.id) AS track_count
                  FROM albums
                  LEFT JOIN artwork ON artwork.id = albums.art_id
-                 LEFT JOIN tracks ON tracks.album_id = albums.id AND tracks.missing = 0
+                 LEFT JOIN tracks ON tracks.album_id = albums.id AND tracks.missing = 0 AND tracks.duplicate_of IS NULL
                  GROUP BY albums.id
                  HAVING track_count > 0
                  ORDER BY albums.sort_album_artist, albums.year, albums.sort_title",
@@ -247,7 +354,7 @@ impl LibraryDb {
                     tracks.duration_ms, tracks.track_number, tracks.disc_number, artwork.cache_path
              FROM tracks
              LEFT JOIN artwork ON artwork.id = tracks.art_id
-             WHERE tracks.missing = 0
+             WHERE tracks.missing = 0 AND tracks.duplicate_of IS NULL
              ORDER BY COALESCE(tracks.track_artist, tracks.album_artist, ''),
                       COALESCE(tracks.album, ''),
                       COALESCE(tracks.disc_number, 1),
@@ -266,7 +373,7 @@ impl LibraryDb {
                     tracks.duration_ms, tracks.track_number, tracks.disc_number, artwork.cache_path
              FROM tracks
              LEFT JOIN artwork ON artwork.id = tracks.art_id
-             WHERE tracks.missing = 0 AND tracks.album_id = ?1
+             WHERE tracks.missing = 0 AND tracks.duplicate_of IS NULL AND tracks.album_id = ?1
              ORDER BY COALESCE(tracks.disc_number, 1), COALESCE(tracks.track_number, 9999), tracks.filename",
             params![album_id],
         )
@@ -281,8 +388,13 @@ impl LibraryDb {
                     tracks.duration_ms, tracks.track_number, tracks.disc_number, artwork.cache_path
              FROM tracks
              LEFT JOIN artwork ON artwork.id = tracks.art_id
-             JOIN track_artists ON track_artists.track_id = tracks.id
-             WHERE tracks.missing = 0 AND track_artists.artist_id = ?1
+             WHERE tracks.missing = 0 AND tracks.duplicate_of IS NULL
+               AND EXISTS (
+                   SELECT 1
+                   FROM track_artists
+                   WHERE track_artists.track_id = tracks.id
+                     AND track_artists.artist_id = ?1
+               )
              ORDER BY COALESCE(tracks.album, ''), COALESCE(tracks.disc_number, 1),
                       COALESCE(tracks.track_number, 9999), tracks.filename",
             params![artist_id],
@@ -344,7 +456,7 @@ impl LibraryDb {
         let current = self
             .conn
             .query_row(
-                "SELECT 1 FROM tracks WHERE path = ?1 AND file_size = ?2 AND modified_at = ?3 AND missing = 0",
+                "SELECT 1 FROM tracks WHERE path = ?1 AND file_size = ?2 AND modified_at = ?3 AND missing = 0 AND song_key IS NOT NULL AND duplicate_of IS NULL",
                 params![path, file_size, modified_at],
                 |_| Ok(()),
             )
@@ -365,6 +477,7 @@ impl LibraryDb {
     }
 
     pub fn finish_scan(&self, root: &str) -> Result<(), String> {
+        self.refresh_artist_stats()?;
         self.conn
             .execute(
                 "UPDATE library_roots SET last_scanned_at = ?2 WHERE path = ?1",
@@ -372,6 +485,63 @@ impl LibraryDb {
             )
             .map_err(|err| err.to_string())?;
         Ok(())
+    }
+
+    fn refresh_artist_stats(&self) -> Result<(), String> {
+        self.conn
+            .execute_batch(
+                "
+                UPDATE artists
+                SET
+                    track_count = (
+                        SELECT COUNT(*)
+                        FROM tracks
+                        WHERE tracks.missing = 0
+                          AND tracks.duplicate_of IS NULL
+                          AND EXISTS (
+                              SELECT 1
+                              FROM track_artists
+                              WHERE track_artists.track_id = tracks.id
+                                AND track_artists.artist_id = artists.id
+                          )
+                    ),
+                    album_count = (
+                        SELECT COUNT(*)
+                        FROM albums
+                        WHERE EXISTS (
+                            SELECT 1
+                            FROM tracks
+                            WHERE tracks.album_id = albums.id
+                              AND tracks.missing = 0
+                              AND tracks.duplicate_of IS NULL
+                              AND EXISTS (
+                                  SELECT 1
+                                  FROM track_artists
+                                  WHERE track_artists.track_id = tracks.id
+                                    AND track_artists.artist_id = artists.id
+                              )
+                        )
+                    ),
+                    art_path = (
+                        SELECT artwork.cache_path
+                        FROM tracks
+                        LEFT JOIN albums ON albums.id = tracks.album_id
+                        LEFT JOIN artwork ON artwork.id = COALESCE(albums.art_id, tracks.art_id)
+                        WHERE tracks.missing = 0
+                          AND tracks.duplicate_of IS NULL
+                          AND artwork.cache_path IS NOT NULL
+                          AND EXISTS (
+                              SELECT 1
+                              FROM track_artists
+                              WHERE track_artists.track_id = tracks.id
+                                AND track_artists.artist_id = artists.id
+                          )
+                        ORDER BY tracks.id
+                        LIMIT 1
+                    );
+                ",
+            )
+            .map_err(|err| err.to_string())
     }
 
     pub fn mark_seen(&self, path: &str) -> Result<(), String> {
@@ -384,7 +554,7 @@ impl LibraryDb {
         Ok(())
     }
 
-    pub fn upsert_track(&mut self, metadata: &TrackMetadata) -> Result<(), String> {
+    pub fn upsert_track(&mut self, metadata: &TrackMetadata) -> Result<bool, String> {
         let tx = self.conn.transaction().map_err(|err| err.to_string())?;
         let art_id = if let Some(art) = &metadata.artwork {
             tx.execute(
@@ -426,20 +596,30 @@ impl LibraryDb {
             .unwrap_or(&metadata.track_artist);
         let album_title = metadata.album.as_deref().unwrap_or("Unknown Album");
         let album_id = upsert_album_tx(&tx, album_title, album_artist, metadata.year, art_id)?;
-        let track_artist_id = upsert_artist_tx(&tx, &metadata.track_artist)?;
-        let album_artist_id = upsert_artist_tx(&tx, album_artist)?;
+        let song_key = song_key_from_metadata(metadata, album_title);
+        let duplicate_of = tx
+            .query_row(
+                "SELECT id FROM tracks
+                 WHERE song_key = ?1 AND path <> ?2 AND missing = 0 AND duplicate_of IS NULL
+                 ORDER BY id
+                 LIMIT 1",
+                params![song_key, metadata.path],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|err| err.to_string())?;
 
         tx.execute(
             "INSERT INTO tracks(
                 path, parent_dir, filename, title, track_artist, album_artist, album, genre,
                 disc_number, disc_total, track_number, track_total, date, year,
                 duration_ms, sample_rate, channels, codec, container, file_size, modified_at,
-                album_id, art_id, indexed_at, missing
+                album_id, art_id, indexed_at, missing, song_key, duplicate_of
              ) VALUES(
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
                 ?9, ?10, ?11, ?12, ?13, ?14,
                 ?15, ?16, ?17, ?18, ?19, ?20, ?21,
-                ?22, ?23, ?24, 0
+                ?22, ?23, ?24, 0, ?25, ?26
              )
              ON CONFLICT(path) DO UPDATE SET
                 parent_dir = excluded.parent_dir,
@@ -465,7 +645,9 @@ impl LibraryDb {
                 album_id = excluded.album_id,
                 art_id = excluded.art_id,
                 indexed_at = excluded.indexed_at,
-                missing = 0",
+                missing = 0,
+                song_key = excluded.song_key,
+                duplicate_of = excluded.duplicate_of",
             params![
                 metadata.path,
                 metadata.parent_dir,
@@ -491,6 +673,8 @@ impl LibraryDb {
                 album_id,
                 art_id,
                 now_ts(),
+                song_key,
+                duplicate_of,
             ],
         )
         .map_err(|err| err.to_string())?;
@@ -507,18 +691,36 @@ impl LibraryDb {
             params![track_id],
         )
         .map_err(|err| err.to_string())?;
-        tx.execute(
-            "INSERT OR IGNORE INTO track_artists(track_id, artist_id, role) VALUES(?1, ?2, 'track_artist')",
-            params![track_id, track_artist_id],
-        )
-        .map_err(|err| err.to_string())?;
-        tx.execute(
-            "INSERT OR IGNORE INTO track_artists(track_id, artist_id, role) VALUES(?1, ?2, 'album_artist')",
-            params![track_id, album_artist_id],
-        )
-        .map_err(|err| err.to_string())?;
+        let track_artists = if metadata.track_artists.is_empty() {
+            vec![metadata.track_artist.as_str()]
+        } else {
+            metadata.track_artists.iter().map(String::as_str).collect()
+        };
+        for artist in track_artists {
+            let artist_id = upsert_artist_tx(&tx, artist)?;
+            tx.execute(
+                "INSERT OR IGNORE INTO track_artists(track_id, artist_id, role) VALUES(?1, ?2, 'track_artist')",
+                params![track_id, artist_id],
+            )
+            .map_err(|err| err.to_string())?;
+        }
 
-        tx.commit().map_err(|err| err.to_string())
+        let album_artists = if metadata.album_artists.is_empty() {
+            vec![album_artist]
+        } else {
+            metadata.album_artists.iter().map(String::as_str).collect()
+        };
+        for artist in album_artists {
+            let artist_id = upsert_artist_tx(&tx, artist)?;
+            tx.execute(
+                "INSERT OR IGNORE INTO track_artists(track_id, artist_id, role) VALUES(?1, ?2, 'album_artist')",
+                params![track_id, artist_id],
+            )
+            .map_err(|err| err.to_string())?;
+        }
+
+        tx.commit().map_err(|err| err.to_string())?;
+        Ok(duplicate_of.is_none())
     }
 }
 
@@ -618,6 +820,17 @@ fn open_sqlite_with_diagnostics() -> Result<Connection, String> {
             Err(format!("open sqlite failed: {}", errors.join(" | ")))
         }
     }
+}
+
+fn song_key_from_metadata(metadata: &TrackMetadata, album_title: &str) -> String {
+    format!(
+        "{}|{}|{}|{}|{}",
+        metadata.disc_number.unwrap_or(0),
+        metadata.track_number.unwrap_or(0),
+        normalize_sort(&metadata.track_artist),
+        normalize_sort(album_title),
+        normalize_sort(metadata.title.as_deref().unwrap_or(&metadata.filename))
+    )
 }
 
 fn album_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AlbumRow> {
