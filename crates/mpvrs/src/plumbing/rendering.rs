@@ -117,6 +117,13 @@ pub fn present() {
     }
 }
 
+pub fn present_common_dialog() {
+    unsafe {
+        vglSwapBuffers(1);
+        sceDisplayWaitVblankStart();
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct GlTexture {
     pub gl_id: u32,

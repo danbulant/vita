@@ -1,4 +1,7 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    mpsc::{self, Receiver, Sender},
+    Arc, Mutex,
+};
 use std::thread::{self, JoinHandle};
 
 use imgui::{Condition, Ui};
@@ -7,6 +10,7 @@ use crate::library::db::normalize_root;
 use crate::library::metadata::split_artist_value;
 use crate::library::{AlbumRow, ArtistRow, LibraryDb, RootRow, ScanProgress, Scanner, TrackRow};
 use crate::plumbing::audio::PlaybackMetadata;
+use crate::plumbing::ime;
 use crate::plumbing::rendering::{SCREEN_H, SCREEN_W};
 use crate::queue::{QueueItem, QueueSource};
 use crate::ui::components::cover_art::{draw_thumbnail_cover_art_at, CoverArtCache};
@@ -33,6 +37,10 @@ pub struct LibraryView {
     scan: Option<JoinHandle<ScanProgress>>,
     scan_progress: Option<Arc<Mutex<ScanProgress>>>,
     last_scan: Option<ScanProgress>,
+    search_query: String,
+    load_tx: Sender<LibraryLoadRequest>,
+    load_rx: Receiver<LibraryLoadResponse>,
+    load_generation: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -63,6 +71,25 @@ pub enum LibraryAction {
     },
 }
 
+#[derive(Clone, Copy, Debug)]
+enum LibraryLoadKind {
+    Artists,
+    Albums,
+    Tracks,
+}
+
+struct LibraryLoadRequest {
+    kind: LibraryLoadKind,
+    generation: u64,
+    query: String,
+}
+
+struct LibraryLoadResponse {
+    generation: u64,
+    query: String,
+    result: Result<LibraryPage, String>,
+}
+
 enum PendingLibraryAction {
     ScanRoot(String),
     LoadArtistTracks {
@@ -84,6 +111,7 @@ enum PendingLibraryAction {
 impl LibraryView {
     pub fn new(browser: FileTreeView, show_current_folder_action: bool) -> Self {
         let current_folder = browser.current_dir().to_owned();
+        let (load_tx, load_rx) = start_library_load_worker();
         let mut view = Self {
             browser,
             db: None,
@@ -95,6 +123,10 @@ impl LibraryView {
             scan: None,
             scan_progress: None,
             last_scan: None,
+            search_query: String::new(),
+            load_tx,
+            load_rx,
+            load_generation: 0,
         };
         view.open_db();
         view
@@ -110,6 +142,7 @@ impl LibraryView {
 
     pub fn refresh(&mut self) {
         self.poll_scan();
+        self.poll_load();
         match self.page {
             LibraryPage::Home => {}
             LibraryPage::Roots(_) => self.load_roots(),
@@ -129,6 +162,7 @@ impl LibraryView {
         cover_cache: &mut CoverArtCache,
     ) -> (Option<LibraryAction>, Option<NavAction>) {
         self.poll_scan();
+        self.poll_load();
         let mut action = None;
         let mut nav_action = None;
 
@@ -140,9 +174,17 @@ impl LibraryView {
             .collapsible(false)
             .build(|| {
                 ui.text(self.title());
+                if self.search_controls_enabled() {
+                    self.draw_search_controls(ui);
+                }
                 ui.separator();
 
-                let list_height = SCREEN_H as f32 - 176.0;
+                let search_height = if self.search_controls_enabled() {
+                    36.0
+                } else {
+                    0.0
+                };
+                let list_height = SCREEN_H as f32 - 176.0 - search_height;
                 let mut list = std::mem::take(&mut self.list);
                 list.draw(ui, "library-list", [0.0, list_height], true, |ui, touch| {
                     action = self.draw_page_rows(
@@ -328,12 +370,15 @@ impl LibraryView {
 
     fn draw_home(&mut self, ui: &Ui, disable_hover: bool) -> Option<LibraryAction> {
         if row(ui, "Artists", disable_hover) {
+            self.clear_search();
             self.load_artists();
         }
         if row(ui, "Albums", disable_hover) {
+            self.clear_search();
             self.load_albums();
         }
         if row(ui, "Tracks", disable_hover) {
+            self.clear_search();
             self.load_tracks();
         }
         if row(ui, "Roots", disable_hover) {
@@ -349,6 +394,53 @@ impl LibraryView {
             }
         }
         None
+    }
+
+    fn search_controls_enabled(&self) -> bool {
+        matches!(
+            self.page,
+            LibraryPage::Artists(_) | LibraryPage::Albums(_) | LibraryPage::Tracks(_)
+        )
+    }
+
+    fn draw_search_controls(&mut self, ui: &Ui) {
+        if ui.button("Search") {
+            match ime::search_text("Search library", &self.search_query) {
+                Ok(Some(query)) => self.set_search_query(query),
+                Ok(None) => {}
+                Err(err) => self.status = err,
+            }
+        }
+
+        if !self.search_query.is_empty() {
+            ui.same_line();
+            if ui.button("Clear") {
+                self.clear_search();
+                self.refresh_search_page();
+            }
+            ui.same_line();
+            ui.text(format!("Filter: {}", self.search_query));
+        }
+    }
+
+    fn set_search_query(&mut self, query: String) {
+        self.search_query = query.trim().to_owned();
+        self.list = ScrollableList::new();
+        self.refresh_search_page();
+    }
+
+    fn clear_search(&mut self) {
+        self.search_query.clear();
+        self.list = ScrollableList::new();
+    }
+
+    fn refresh_search_page(&mut self) {
+        match self.page {
+            LibraryPage::Artists(_) => self.load_artists(),
+            LibraryPage::Albums(_) => self.load_albums(),
+            LibraryPage::Tracks(_) => self.load_tracks(),
+            _ => {}
+        }
     }
 
     fn open_db(&mut self) {
@@ -469,35 +561,58 @@ impl LibraryView {
     }
 
     fn load_artists(&mut self) {
-        self.ensure_db();
-        let Some(db) = &self.db else {
-            return;
-        };
-        match db.artists() {
-            Ok(artists) => self.page = LibraryPage::Artists(artists),
-            Err(err) => self.status = format!("Failed to load artists: {err}"),
-        }
+        self.start_load(LibraryLoadKind::Artists);
     }
 
     fn load_albums(&mut self) {
-        self.ensure_db();
-        let Some(db) = &self.db else {
-            return;
-        };
-        match db.albums() {
-            Ok(albums) => self.page = LibraryPage::Albums(albums),
-            Err(err) => self.status = format!("Failed to load albums: {err}"),
-        }
+        self.start_load(LibraryLoadKind::Albums);
     }
 
     fn load_tracks(&mut self) {
-        self.ensure_db();
-        let Some(db) = &self.db else {
-            return;
-        };
-        match db.tracks() {
-            Ok(tracks) => self.page = LibraryPage::Tracks(tracks),
-            Err(err) => self.status = format!("Failed to load tracks: {err}"),
+        self.start_load(LibraryLoadKind::Tracks);
+    }
+
+    fn start_load(&mut self, kind: LibraryLoadKind) {
+        self.load_generation = self.load_generation.wrapping_add(1);
+        let generation = self.load_generation;
+        let query = self.search_query.clone();
+
+        self.page = empty_page_for_load(kind);
+        self.list = ScrollableList::new();
+        self.status = format!("Loading {}...", load_kind_label(kind));
+
+        if self
+            .load_tx
+            .send(LibraryLoadRequest {
+                kind,
+                generation,
+                query,
+            })
+            .is_err()
+        {
+            let message = format!("{} load worker stopped", load_kind_title(kind));
+            eprintln!("mpvrs: {message}");
+            self.status = message;
+        }
+    }
+
+    fn poll_load(&mut self) {
+        while let Ok(response) = self.load_rx.try_recv() {
+            if response.generation != self.load_generation || response.query != self.search_query {
+                continue;
+            }
+
+            match response.result {
+                Ok(page) => {
+                    self.page = page;
+                    self.list = ScrollableList::new();
+                    self.status.clear();
+                }
+                Err(err) => {
+                    eprintln!("mpvrs: async library load failed: {err}");
+                    self.status = err;
+                }
+            }
         }
     }
 
@@ -538,6 +653,135 @@ impl LibraryView {
             }
         }
     }
+}
+
+fn start_library_load_worker() -> (Sender<LibraryLoadRequest>, Receiver<LibraryLoadResponse>) {
+    let (request_tx, request_rx) = mpsc::channel::<LibraryLoadRequest>();
+    let (response_tx, response_rx) = mpsc::channel::<LibraryLoadResponse>();
+
+    thread::spawn(move || {
+        let db = LibraryDb::open_default();
+        if let Err(err) = &db {
+            eprintln!("mpvrs: failed to open async library DB: {err}");
+        }
+
+        for request in request_rx {
+            let result = match &db {
+                Ok(db) => query_library_page(db, request.kind, &request.query),
+                Err(err) => Err(format!("Library DB unavailable: {err}")),
+            };
+
+            if response_tx
+                .send(LibraryLoadResponse {
+                    generation: request.generation,
+                    query: request.query,
+                    result,
+                })
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+
+    (request_tx, response_rx)
+}
+
+fn query_library_page(
+    db: &LibraryDb,
+    kind: LibraryLoadKind,
+    query: &str,
+) -> Result<LibraryPage, String> {
+    match kind {
+        LibraryLoadKind::Artists => db
+            .artists()
+            .map(|artists| LibraryPage::Artists(filter_artists(artists, query)))
+            .map_err(|err| format!("Failed to load artists: {err}")),
+        LibraryLoadKind::Albums => db
+            .albums()
+            .map(|albums| LibraryPage::Albums(filter_albums(albums, query)))
+            .map_err(|err| format!("Failed to load albums: {err}")),
+        LibraryLoadKind::Tracks => db
+            .tracks()
+            .map(|tracks| LibraryPage::Tracks(filter_tracks(tracks, query)))
+            .map_err(|err| format!("Failed to load tracks: {err}")),
+    }
+}
+
+fn empty_page_for_load(kind: LibraryLoadKind) -> LibraryPage {
+    match kind {
+        LibraryLoadKind::Artists => LibraryPage::Artists(Vec::new()),
+        LibraryLoadKind::Albums => LibraryPage::Albums(Vec::new()),
+        LibraryLoadKind::Tracks => LibraryPage::Tracks(Vec::new()),
+    }
+}
+
+fn load_kind_label(kind: LibraryLoadKind) -> &'static str {
+    match kind {
+        LibraryLoadKind::Artists => "artists",
+        LibraryLoadKind::Albums => "albums",
+        LibraryLoadKind::Tracks => "tracks",
+    }
+}
+
+fn load_kind_title(kind: LibraryLoadKind) -> &'static str {
+    match kind {
+        LibraryLoadKind::Artists => "Artists",
+        LibraryLoadKind::Albums => "Albums",
+        LibraryLoadKind::Tracks => "Tracks",
+    }
+}
+
+fn filter_artists(artists: Vec<ArtistRow>, query: &str) -> Vec<ArtistRow> {
+    let Some(query) = normalized_query(query) else {
+        return artists;
+    };
+    artists
+        .into_iter()
+        .filter(|artist| contains_case_insensitive(&artist.name, &query))
+        .collect()
+}
+
+fn filter_albums(albums: Vec<AlbumRow>, query: &str) -> Vec<AlbumRow> {
+    let Some(query) = normalized_query(query) else {
+        return albums;
+    };
+    albums
+        .into_iter()
+        .filter(|album| {
+            contains_case_insensitive(&album.title, &query)
+                || contains_case_insensitive(&album.album_artist, &query)
+        })
+        .collect()
+}
+
+fn filter_tracks(tracks: Vec<TrackRow>, query: &str) -> Vec<TrackRow> {
+    let Some(query) = normalized_query(query) else {
+        return tracks;
+    };
+    tracks
+        .into_iter()
+        .filter(|track| {
+            contains_case_insensitive(&track.title, &query)
+                || contains_case_insensitive(&track.track_artist, &query)
+                || contains_case_insensitive(&track.album, &query)
+                || contains_case_insensitive(&track.album_artist, &query)
+                || contains_case_insensitive(&track.path, &query)
+        })
+        .collect()
+}
+
+fn normalized_query(query: &str) -> Option<String> {
+    let query = query.trim();
+    if query.is_empty() {
+        None
+    } else {
+        Some(query.to_ascii_lowercase())
+    }
+}
+
+fn contains_case_insensitive(value: &str, normalized_query: &str) -> bool {
+    value.to_ascii_lowercase().contains(normalized_query)
 }
 
 fn draw_roots(ui: &Ui, disable_hover: bool, roots: &[RootRow]) -> Option<PendingLibraryAction> {
