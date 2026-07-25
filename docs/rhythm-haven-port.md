@@ -239,3 +239,71 @@ Next translation slices are load/store and block transfer, an address-space
 interface for main RAM/TCM/MMIO, condition evaluation, and an ARMv7 emitter with
 an instruction-cache flush. ARM7 audio execution and DS 2D graphics command
 translation will follow behind those interfaces.
+
+### 2026-07-26: Vita3K desktop bring-up and first guest crash
+
+The earlier Vita3K failure was a host-display problem, not a guest result. The
+shell runs inside `screen` and did not inherit the active Hyprland display.
+Hyprland was reachable at `/run/user/1000/wayland-1`, but it had no monitor.
+Creating a temporary headless output named `VITA3K` made the emulator window
+available for remote inspection. Native Wayland connected, but rendered a
+black UI with this Vita3K/SDL combination. XWayland (`DISPLAY=:0` and
+`SDL_VIDEODRIVER=x11`) rendered correctly.
+
+The working host environment is:
+
+```sh
+export DISPLAY=:0
+export XDG_SESSION_TYPE=x11
+export SDL_VIDEODRIVER=x11
+export DRI_PRIME=1
+```
+
+`DRI_PRIME=1` is important on this hybrid-GPU host. Native Wayland otherwise
+selected llvmpipe after failing to initialize the NVIDIA device. XWayland used
+the NVIDIA RTX 5070 directly and reported OpenGL 4.6. Both are host details,
+not Vita compatibility requirements.
+
+Vita3K build 3821 required its interactive first-run flow, a user profile,
+automatic user login, update checks disabled, and the Vita lock screen dragged
+up before its desktop became usable. Firmware 3.65 from the supplied PUP was
+already installed in the isolated prefix. The release VPK then installed as
+`DSVITA000`, and the staged ROM remained separate at
+`ux0:data/dsvita/Rhythm Heaven.nds`.
+
+This produced the first real emulator execution evidence. DSVita loaded its
+SELF and firmware modules, initialized vitaGL, reached its own startup logging,
+and then failed while allocating the fixed guest-register pages:
+
+```text
+[actual_main] Checking for kubridge
+Unimplemented _vshKernelSearchModuleByName import called.
+Import function for NID 0x2EF7C290 not found
+thread 'actual_main' panicked at src/lib.rs:407:138:
+called Result::unwrap() on an Err value: Kind(AddrNotAvailable)
+```
+
+NID `0x2EF7C290` is DSVita's `kuKernelAllocMemBlock` import. `Mmap::rw` uses
+kubridge's kernel allocation options to request exact addresses for emulated
+ARM7 and ARM9 register state. Vita3K build 3821 does not provide that module,
+so the call fails before the ROM or either DS CPU starts. Missing
+`libshacccg.suprx` is also logged, but vitaGL continued past that probe and the
+kubridge allocation is the observed fatal gate.
+
+An existing upstream solution is in progress: Vita3K pull request 3958,
+`modules: introduce virtual modules (kubridge, fd_fix)`, adds a virtual
+kubridge module and a `kuKernelAllocMemBlock` implementation. The PR head
+examined here is `d66ef47`; it is not included in packaged build 3821. The next
+emulator experiment should build that PR and reuse this installed prefix. If
+its allocation semantics are sufficient, DSVita should advance far enough to
+exercise the actual ARM translator. If not, compare the requested fixed base
+and returned block base before changing DSVita's memory model.
+
+Sources checked:
+
+- [Vita3K repository](https://github.com/Vita3K/Vita3K)
+- [Vita3K pull requests](https://github.com/Vita3K/Vita3K/pulls)
+- DSVita's checked-in `src/mmap/vita.rs` and generated kubridge stub
+
+The headless output is temporary compositor state and can be removed with
+`hyprctl output remove VITA3K` after testing.
