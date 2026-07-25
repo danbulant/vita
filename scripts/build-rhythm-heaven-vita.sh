@@ -6,6 +6,7 @@ dsvita_dir="$repo_root/third_party/DSVita"
 rom_path="${1:-$repo_root/roms/3588 - Rhythm Heaven (US)(XenoPhobia).nds}"
 stage_dir="$repo_root/dist/rhythm-heaven-vita"
 profile="${DSVITA_PROFILE:-release}"
+vita3k="${DSVITA_VITA3K:-0}"
 
 case "$profile" in
     release)
@@ -23,6 +24,21 @@ case "$profile" in
         ;;
 esac
 
+case "$vita3k" in
+    0)
+        cargo_feature_args=()
+        ;;
+    1)
+        cargo_feature_args=(--features vita3k)
+        vpk_name="${vpk_name%.vpk}-vita3k.vpk"
+        ;;
+    *)
+        echo "Unsupported DSVITA_VITA3K: $vita3k" >&2
+        echo "Expected 0 or 1" >&2
+        exit 1
+        ;;
+esac
+
 if [[ ! -f "$rom_path" ]]; then
     echo "Missing Rhythm Heaven ROM: $rom_path" >&2
     exit 1
@@ -36,7 +52,7 @@ fi
 
 echo "Building DSVita $profile VPK" >&2
 nix develop "$repo_root" --command bash -lc \
-    "cd '$dsvita_dir' && cargo vita build vpk ${cargo_profile_args[*]}"
+    "cd '$dsvita_dir' && cargo vita build vpk ${cargo_profile_args[*]} ${cargo_feature_args[*]}"
 
 mkdir -p "$stage_dir/ux0/data/dsvita"
 cp "$dsvita_dir/target/armv7-sony-vita-newlibeabihf/$profile/dsvita.vpk" \

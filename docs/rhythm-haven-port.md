@@ -346,3 +346,41 @@ module produced a flood of invalid `ldrex` accesses around `0x84164e6c` and
 `0x84248500`, followed by a Vita3K host segfault. The next emulator target is
 therefore shader compiler LLE/HLE behavior (or precompiled vitaGL shaders),
 not kubridge or DSVita's fixed memory map.
+
+### 2026-07-26: stable frontend and first translated game code
+
+The apparent `libshacccg` failure was a secondary cleanup crash. DSVita started
+its RetroAchievements HTTP worker unconditionally; Reqwest/Tokio then panicked
+because Vita3K's `sceNetEpollWait` returns `EINVAL`. Unwinding released the
+256 MiB newlib heap while shader/compiler threads were still active, producing
+the misleading invalid `ldrex` flood. No ready-made replacement translator was
+found in Vita3K: its `SceShaccCg` exports are stubs, while the dumped
+`libshacccg.suprx` is the available LLE implementation.
+
+DSVita now has an explicit `vita3k` Cargo feature. It suppresses the unsupported
+network worker and, when exactly one ROM is installed, launches it directly so
+desktop automation does not depend on Vita controller focus. Normal hardware
+builds retain networking and the ROM menu. Build this diagnostic package with:
+
+```sh
+DSVITA_VITA3K=1 scripts/build-rhythm-heaven-vita.sh
+```
+
+With the feature enabled, the supplied shader compiler generated and cached
+working vitaGL vertex and fragment programs, the frontend remained stable at
+60 FPS, and Rhythm Heaven reached its real boot path. DSVita parsed the ROM,
+reported ARM9 entry `0x02000800` and ARM7 entry `0x02380000`, and emitted code
+for both processors. This confirms that the current port is executing the
+ARM-to-ARM translator, rather than merely displaying a ROM browser.
+
+The first game-code panic was a missing ARM7 MMIO read for DS register
+`SOUNDBIAS` at `0x04000504`. The write path and SPU state already existed; the
+read table still contained `todo!()`. It now returns the stored 10-bit sound
+bias. The next run immediately reached the two sound-capture destination
+registers (`0x510` and `0x518`), whose write-side state also already existed;
+their read handlers now return that state as well.
+
+Vita3K PR 3958 also logs that kubridge `baseBlock` mirrors are not implemented.
+The current run advances through initial JIT generation despite that warning,
+so it is not the immediate failure, but correct mirrored mappings may become
+necessary as more translated blocks are invalidated or recycled.
