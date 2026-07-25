@@ -384,3 +384,44 @@ Vita3K PR 3958 also logs that kubridge `baseBlock` mirrors are not implemented.
 The current run advances through initial JIT generation despite that warning,
 so it is not the immediate failure, but correct mirrored mappings may become
 necessary as more translated blocks are invalidated or recycled.
+
+### 2026-07-26: shared kubridge mappings and sustained game execution
+
+The next two ARM7 failures were ordinary missing DS hardware handlers rather
+than translator instructions. `0x04100010` is the shared game-card data port;
+the ARM9 table already called `cartridge_get_rom_data_in`, while ARM7 still had
+`todo!()`. ARM7 now uses the same cartridge implementation. The only remaining
+`todo!()` in its main I/O table was the `HALTCNT` write at `0x04000301`; the
+existing `cpu_set_halt_cnt` implementation is now connected there.
+
+After those fixes the process stopped panicking, but translated execution
+walked through low/null addresses. This confirmed that PR 3958's missing
+`baseBlock` behavior was no longer optional. DSVita allocates one shared memory
+block and repeatedly maps its pages into ARM7/ARM9 read, write, and code-cache
+windows. Treating every reserved window as independent memory lets JIT setup
+finish but gives the generated code unrelated data.
+
+The Vita3K patch now implements Linux guest aliases using a sparse `memfd`
+backing for the 4 GiB Vita address space. `kuKernelMemCommit` with
+`KU_KERNEL_MEM_COMMIT_ATTR_HAS_BASE` remaps the requested virtual range with
+`MAP_SHARED | MAP_FIXED` at the base block's file offset. Each alias therefore
+has a distinct host virtual address but shares physical data, which is also
+important for DSVita's address-specific `mprotect`/abort-based JIT invalidation.
+Decommit restores the range's original file offset. The page-table renderer has
+an equivalent page-table alias path, although that renderer currently crashes
+inside the dumped shader compiler and is not used for this test.
+
+With the normal `double-buffer` renderer, the shared mapping implementation
+created all requested B/C-region mirrors, detected Nitro SDK 4.2.30001, copied
+the cartridge header, translated the ARM9 and ARM7 binaries, initialized the DS
+GPU shaders, and then sustained the guest at 58-59 Vita frames per second for
+more than 30 seconds without a Rust panic or invalid low-address memory reads.
+The DSVita statistics report about 98% of the requested 59/60 DS frames. Both
+DS displays are still black, so this is active game execution but not yet a
+visually complete boot. The next investigation should distinguish an emulated
+CPU/IRQ startup stall from a framebuffer upload or presentation issue.
+
+The updated `patches/vita3k-dsvita-memory.patch` applies cleanly to Vita3K PR
+3958 head `d66ef47`. Linux is the validated alias backend; the helper currently
+returns unsupported for direct-memory Windows builds rather than pretending
+to create independent pages.
