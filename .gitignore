@@ -1,3 +1,5 @@
 vitadump
 3ds_dump
 target
+/dist/
+/roms/*.nds

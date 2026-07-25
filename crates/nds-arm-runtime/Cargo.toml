@@ -1,0 +1,11 @@
+[package]
+name = "nds-arm-runtime"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "nds-inspect"
+path = "src/bin/nds-inspect.rs"

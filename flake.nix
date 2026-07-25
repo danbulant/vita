@@ -119,6 +119,27 @@
             runHook postInstall
           '';
         };
+      dsvita-llvm-compat = pkgs.symlinkJoin {
+        name = "dsvita-llvm-compat";
+        paths = [
+          (pkgs.writeShellScriptBin "clang-21" ''exec ${pkgs.llvmPackages_21.clang-unwrapped}/bin/clang "$@"'')
+          (pkgs.writeShellScriptBin "clang++-21" ''exec ${pkgs.llvmPackages_21.clang-unwrapped}/bin/clang++ "$@"'')
+          (pkgs.writeShellScriptBin "llvm-ar-21" ''exec ${pkgs.llvmPackages_21.llvm}/bin/llvm-ar "$@"'')
+        ];
+      };
+      vita-sdk-combined = pkgs.symlinkJoin {
+        name = "vita-sdk-combined";
+        paths = [
+          vitasdk.packages.${system}.vitasdk
+          vitasdk.packages.${system}.openssl
+          vitasdk.packages.${system}.imgui
+          vitasdk.packages.${system}.vitaGL
+          vitasdk.packages.${system}.vitaShaRK
+          vitasdk.packages.${system}.libmathneon
+          vitasdk.packages.${system}.SceShaccCgExt
+          vitasdk.packages.${system}.taihen
+        ];
+      };
     in
     {
       devShells.${system}.default = pkgs.mkShell {
@@ -127,6 +148,15 @@
           fenix.packages.${system}.complete.toolchain
           fenix.packages.${system}.rust-analyzer
 
+          # DSVita uses LLVM 18 for bindgen and clang 21 for its mixed
+          # Rust/C/C++ Vita build. Keep both explicit and expose libclang below.
+          pkgs.llvmPackages_18.libclang
+          pkgs.llvmPackages_21.clang
+          pkgs.llvmPackages_21.lld
+          dsvita-llvm-compat
+          vita-sdk-combined
+          pkgs.cmake
+
           vitasdk.packages.${system}.vitasdk
           vitasdk.packages.${system}.vitaGL
           vitasdk.packages.${system}.vitaShaRK
@@ -134,6 +164,7 @@
           vitasdk.packages.${system}.SceShaccCgExt
           vitasdk.packages.${system}.taihen
           vitasdk.packages.${system}.sdl2
+          vitasdk.packages.${system}.openssl
           bindiff
           ghidra-with-extensions
           retdec
@@ -168,6 +199,12 @@
         ];
 
         shellHook = ''
+          export LIBCLANG_PATH="${pkgs.llvmPackages_18.libclang.lib}/lib"
+          export BINDGEN_EXTRA_CLANG_ARGS="-isystem ${pkgs.llvmPackages_18.clang-unwrapped.lib}/lib/clang/18/include"
+          export ARMV7_SONY_VITA_NEWLIBEABIHF_OPENSSL_INCLUDE_DIR="${vitasdk.packages.${system}.openssl}/arm-vita-eabi/include"
+          export ARMV7_SONY_VITA_NEWLIBEABIHF_OPENSSL_LIB_DIR="${vitasdk.packages.${system}.openssl}/arm-vita-eabi/lib"
+          export ARMV7_SONY_VITA_NEWLIBEABIHF_OPENSSL_STATIC=1
+          export VITASDK="${vita-sdk-combined}"
           export GHIDRA_MCP_BRIDGE="${
             reenv.packages.${system}.ghidra-with-extensions
           }/libexec/ghidra-mcp/bridge_mcp_ghidra.py"
