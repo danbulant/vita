@@ -3,3 +3,4 @@ vitadump
 target
 /dist/
 /roms/*.nds
+/artifacts/

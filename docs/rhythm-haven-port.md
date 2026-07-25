@@ -207,6 +207,27 @@ The packaging script now performs a cheap repeatable VPK smoke check after every
 build: `eboot.bin`, `sce_sys/param.sfo`, and the icon must be present, and no DS,
 3DS, or CIA game image may be embedded in the VPK.
 
+### 2026-07-25: device diagnostic handoff
+
+No Vita is currently attached over USB. A `VITA_IP` is configured in the shell,
+but the common VitaShell FTP ports (21, 1337, and 2121) and SSH port 22 were not
+reachable during this session.
+
+`DSVITA_PROFILE=release-debug scripts/build-rhythm-heaven-vita.sh` now produces
+and validates `dist/rhythm-heaven-vita/DSVita-debug.vpk`. The build succeeded.
+Unlike the stripped release VPK, this optimized diagnostic profile retains the
+checks and reporting needed to localize an early ARM/JIT failure.
+
+See `docs/rhythm-heaven-device-test.md` for the mode matrix and
+`scripts/vita-rhythm-heaven.sh` for VitaShell FTP deployment/log retrieval.
+
+The Vita dump prerequisite audit found `ur0:data/libshacccg.suprx` and an active
+`ur0:tai/kubridge.skprx` entry in `ur0:tai/config.txt`. DSVita's kubridge
+submodule is pinned at `a4ef20f` (`v0.3.1_hotfix`), and its freshly built plugin
+is now staged outside the VPK for optional manual installation. The helper will
+only upload it to `ux0:data/rhythm-heaven-prerequisites`; it never overwrites
+the live kernel plugin or edits taiHEN configuration.
+
 Run:
 
 ```sh
