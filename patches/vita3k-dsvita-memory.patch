@@ -1,0 +1,40 @@
+diff --git a/vita3k/mem/src/mem.cpp b/vita3k/mem/src/mem.cpp
+--- a/vita3k/mem/src/mem.cpp
++++ b/vita3k/mem/src/mem.cpp
+@@ -201,7 +201,8 @@ Address alloc_aligned(MemState &state, uint32_t size, const char *name, unsigned
+     if (alignment == 0)
+         return alloc(state, size, name, start_addr);
+     const std::lock_guard<std::mutex> lock(state.generation_mutex);
+-    size += alignment;
++    const uint32_t requested_page_count = align(size, STANDARD_PAGE_SIZE) / STANDARD_PAGE_SIZE;
++    size += alignment - STANDARD_PAGE_SIZE;
+     const uint32_t page_count = align(size, STANDARD_PAGE_SIZE) / STANDARD_PAGE_SIZE;
+     const Address addr = alloc_inner(state, start_addr / STANDARD_PAGE_SIZE, page_count, name, false);
+     const Address align_addr = align(addr, alignment);
+@@ -215,8 +216,13 @@ Address alloc_aligned(MemState &state, uint32_t size, const char *name, unsigned
+         state.allocator.free(page_num, remnant_front);
+         page.allocated = 0;
+         align_page.allocated = 1;
+-        align_page.size = page.size - remnant_front;
+     }
++    state.alloc_table[align_page_num].size = requested_page_count;
++
++    const uint32_t reserved_end_page = page_num + page_count;
++    const uint32_t requested_end_page = align_page_num + requested_page_count;
++    if (requested_end_page < reserved_end_page)
++        state.allocator.free(requested_end_page, reserved_end_page - requested_end_page);
+ 
+     return align_addr;
+ }
+diff --git a/vita3k/modules/SceSysmem/SceSysmemForDriver.cpp b/vita3k/modules/SceSysmem/SceSysmemForDriver.cpp
+--- a/vita3k/modules/SceSysmem/SceSysmemForDriver.cpp
++++ b/vita3k/modules/SceSysmem/SceSysmemForDriver.cpp
+@@ -110,8 +110,6 @@ EXPORT(SceUID, ksceKernelAllocMemBlock, const char *name, SceKernelMemBlockType t
+         }
+     }
+ 
+-    alignment = std::max(alignment, size & -size);
+-
+     const auto state = emuenv.kernel.obj_store.get<SysmemState>();
+     const auto guard = std::lock_guard<std::mutex>(state->mutex);
+ 

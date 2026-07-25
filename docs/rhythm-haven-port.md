@@ -307,3 +307,42 @@ Sources checked:
 
 The headless output is temporary compositor state and can be removed with
 `hyprctl output remove VITA3K` after testing.
+
+### 2026-07-26: kubridge branch and allocator breakthrough
+
+Vita3K PR 3958 (`d66ef47`) was built locally with its virtual `kubridge` and
+`fd_fix` modules. The branch uses a newer Qt configuration schema than build
+3821, so it needed a fresh config pointed at the existing isolated firmware
+and app prefix. On NixOS the locally linked binary also needed its runtime
+RPATH patched; XWayland remained the reliable display path.
+
+The virtual module resolved NID `0x2EF7C290`, but its first fixed allocation at
+`0xA0000000` still failed. Instrumenting Vita3K's allocator identified the
+conflict: DSVita requests a 256 MiB newlib heap, while `alloc_aligned` reserved
+almost 512 MiB and retained its unused alignment tail. In addition,
+`ksceKernelAllocMemBlock` promoted alignment to `size & -size`, incorrectly
+forcing the power-of-two heap to 256 MiB alignment. Together these choices
+placed/reserved the heap across DSVita's fixed ARM register and JIT windows.
+
+The experimental fix does two things:
+
+- releases both front and tail padding from aligned allocations and records
+  only the requested page count;
+- honors the memory-block type/explicit alignment instead of deriving an
+  additional alignment from allocation size.
+
+The reusable source patch is `patches/vita3k-dsvita-memory.patch`. It applies
+on top of PR 3958. Vita3K's 13 bitmap allocator tests pass with it.
+
+With both fixes, DSVita successfully allocated `0xA0000000`, protected the
+32 MiB JIT window at `0x98000000`, reserved its 256 MiB and 176 MiB guest
+regions, found and opened `Rhythm Heaven.nds`, initialized configuration and
+networking, and reached its first render/shader request. This is the first run
+past DSVita's ARM translator/JIT initialization in Vita3K.
+
+Copying the already-supplied dump's `libshacccg.suprx` into the isolated
+Vita3K `ur0:data` path allowed shader compiler loading, but executing that LLE
+module produced a flood of invalid `ldrex` accesses around `0x84164e6c` and
+`0x84248500`, followed by a Vita3K host segfault. The next emulator target is
+therefore shader compiler LLE/HLE behavior (or precompiled vitaGL shaders),
+not kubridge or DSVita's fixed memory map.
