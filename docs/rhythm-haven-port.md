@@ -425,3 +425,42 @@ The updated `patches/vita3k-dsvita-memory.patch` applies cleanly to Vita3K PR
 3958 head `d66ef47`. Linux is the validated alias backend; the helper currently
 returns unsupported for direct-memory Windows builds rather than pretending
 to create independent pages.
+
+### 2026-07-26: black-screen boundary isolated to frozen DS video state
+
+The ROM itself is a known-good baseline. Its SHA-256 is
+`6c1889d2f6f5814cb3f5a87b3ed095cf6f3287f011d9cfd60d31ad56b85e038d`.
+melonDS 1.1 decrypts its secure area and reaches the animated Rhythm Heaven
+title/touch screen in under eight seconds with the software renderer. The
+remaining DSVita black screen is therefore not a bad dump or an expected game
+delay.
+
+The existing guest-time and final-frame diagnostics depended on environment
+variables, which Vita3K does not pass into a Vita application. A `vita3k`-only
+diagnostic path now samples frames 60 and 300 automatically. Normal Vita builds
+are unchanged. On Vita, final framebuffer sampling uses vitaGL's bound-texture
+pointer; `glReadPixels` is not usable through this Vita3K path and caused a
+large series of misleading low-address `MemoryRead` errors.
+
+Both samples are identical:
+
+```text
+VBLANKHASH#60  main=5480eb98 vram=fc4e4637 palettes=c26ab74e oam=e8e9e4ab regs2d=85f6413c/f4c05819 pow=01
+VBLANKHASH#300 main=5480eb98 vram=fc4e4637 palettes=c26ab74e oam=e8e9e4ab regs2d=85f6413c/f4c05819 pow=01
+UBODUMP#60/300 disp_cnt[0]=0 disp_cnt[96]=0 bg_cnt[0..4]=0,0,0,0 ofs[0..4]=0,0,0,0
+FRAMEDUMP#60/300 hash=5aa01a83 ubo_a=98968312 ubo_b=98968312
+```
+
+This rules out the final VitaGL composition as the primary fault. DS vblank
+events continue at roughly full speed, but main RAM, VRAM, palettes, OAM, both
+2D register files, render-feed snapshots, and the final texture are unchanged
+from frame 60 through frame 300. The display control tables remain disabled.
+The next target is the emulated ARM9/ARM7 halt and interrupt state during this
+interval, especially whether boot code entered HALT waiting for an IRQ that is
+pending but not delivered. No large renderer or translator rewrite is
+justified before that state is measured.
+
+For unattended desktop runs, the isolated Vita3K configuration must set
+`warn-missing-firmware: false`; otherwise its missing font-package modal blocks
+the `--installed-path DSVITA000` auto-boot. Vita3K works through Hyprland using
+the XCB backend on the temporary `VITA3K` output.
