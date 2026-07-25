@@ -189,6 +189,24 @@ requires a Vita run (or an ARM Linux execution harness) and the resulting log.
 The next invasive changes must be based on that evidence, not speculative JIT
 rewrites.
 
+### 2026-07-25: Vita3K launch probe
+
+Nixpkgs provides Vita3K build 3821. Its command-line firmware installer
+successfully parsed the supplied `PSP2UPDAT.PUP` as firmware 3.65 (build 570279)
+and extracted it to an isolated temporary prefix. This establishes that the
+Vita dump contains a usable update package; no 3DS/CIA tool is relevant to it.
+
+Vita3K did not provide a game-boot signal on this host. Console mode exits
+during initialization without a display, and an Xvfb/OpenGL run segfaults before
+guest loading. More importantly, DSVita relies on kubridge fast-memory behavior
+and `libshacccg.suprx`, so a Vita3K success would still be weaker than a real
+device test. Do not treat this host-emulator failure as a DSVita or Rhythm
+Heaven failure.
+
+The packaging script now performs a cheap repeatable VPK smoke check after every
+build: `eboot.bin`, `sce_sys/param.sfo`, and the icon must be present, and no DS,
+3DS, or CIA game image may be embedded in the VPK.
+
 Run:
 
 ```sh

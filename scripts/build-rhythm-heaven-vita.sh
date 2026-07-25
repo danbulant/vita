@@ -26,5 +26,19 @@ cp "$dsvita_dir/target/armv7-sony-vita-newlibeabihf/release/dsvita.vpk" \
     "$stage_dir/DSVita.vpk"
 cp "$rom_path" "$stage_dir/ux0/data/dsvita/Rhythm Heaven.nds"
 
+vpk_listing=$(python3 -c \
+    'import sys, zipfile; print("\n".join(zipfile.ZipFile(sys.argv[1]).namelist()))' \
+    "$stage_dir/DSVita.vpk")
+for required_entry in eboot.bin sce_sys/param.sfo sce_sys/icon0.png; do
+    if ! grep -Fxq "$required_entry" <<<"$vpk_listing"; then
+        echo "Invalid VPK: missing $required_entry" >&2
+        exit 1
+    fi
+done
+if grep -Eiq '\.(nds|cia|3ds)$' <<<"$vpk_listing"; then
+    echo "Invalid VPK: game image was embedded in the application package" >&2
+    exit 1
+fi
+
 echo "Staged Vita install files in $stage_dir" >&2
 echo "Install DSVita.vpk and copy the ux0 tree to the Vita." >&2
