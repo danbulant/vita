@@ -464,3 +464,58 @@ For unattended desktop runs, the isolated Vita3K configuration must set
 `warn-missing-firmware: false`; otherwise its missing font-package modal blocks
 the `--installed-path DSVITA000` auto-boot. Vita3K works through Hyprland using
 the XCB backend on the temporary `VITA3K` output.
+
+### 2026-07-26: ARM9 IPC stall traced to Vita3K kubridge abort compatibility
+
+CPU and IPC probes narrowed the frozen boot to the standard dual-CPU startup
+handshake. ARM7 repeatedly writes output nibble 7 to IPCSYNC. ARM9 remains in
+the routine at `0x02034168..0x020341bc`, whose disassembly reads IPCSYNC at
+`0x04000180`, echoes the input nibble with `strh`, and waits for it to change.
+ARM7 enters the emulator's IPC read/write handlers, but translated ARM9 memory
+operations initially did not. At frames 60 and 300 the visible state was still
+unchanged, ARM9 IPCSYNC was `0x0007`, and ARM7 IPCSYNC was `0x0700`.
+
+The first JIT correction commits a dynamic branch target and its Thumb state
+before an ARM7 scheduler exit. This changed ARM7 CPSR from the inconsistent
+Thumb value `0x200000bf` to ARM state `0x2000009f`, but did not by itself pass
+the IPC handshake. Release JIT scheduler call sites now also supply their real
+guest PC instead of compiling it out with debug logging; this is needed for
+correct interrupt/return diagnostics and handling.
+
+The decisive host evidence is Vita3K's missing import:
+
+```text
+Import function for NID 0x799F5648 not found
+```
+
+NID `0x799F5648` is kubridge 0.3.x `kuKernelRegisterAbortHandler`, which DSVita
+uses to turn protected fastmem faults into JIT slow-memory patches. The tested
+Vita3K PR implemented `kuKernelRegisterExceptionHandler`, but not this legacy
+entry point. Consequently its protected ARM9 access raised a host fault but
+never called DSVita's patcher. Adding the exact export and NID changes the run
+from a silent black-screen loop to an actual dispatched data abort:
+
+```text
+kuKernelRegisterAbortHandler: handler=0x81009E35 old=0x00000000
+DABT handler=0x81009E35 FAR=0xB4000208 PC=0x98000074
+```
+
+Vita3K's current abort trampoline is also ABI-incomplete. It constructed only
+68 bytes, while kubridge's `KuKernelAbortContext` is 344 bytes (16 integer
+registers, 32 64-bit VFP registers, and six status/fault words), and it treated
+the callback as notification-only instead of applying the handler's edited PC
+to retry the patched instruction. Correcting the layout makes DSVita receive a
+coherent FAR, exposing the remaining callback-return failure around Vita3K's
+halt sentinel. This is now the immediate blocker; it is in Vita3K's kubridge
+exception bridge, not the DS IPC implementation or Rhythm Heaven game code.
+
+Architecture references used to verify the handshake and IPCSYNC bit layout:
+
+- [GBATEK IPCSYNC documentation](https://mgba-emu.github.io/gbatek/)
+- [NDS boot and dual-CPU overview](https://blog.gistre.epita.fr/posts/augustin.claude-2025-06-16-the_booting_process_of_the_nds_and_its_dual_cpu_architecture/)
+- [Nintendo DS boot sequence notes](https://shonumi.github.io/articles/art3.html)
+
+The Vita3K path remains a desktop correctness oracle. Real Vita hardware uses
+kubridge's native abort machinery and should keep the fast ARM-to-ARM JIT; do
+not replace it with an all-slow-memory renderer or interpreter based on this
+host-emulator limitation.

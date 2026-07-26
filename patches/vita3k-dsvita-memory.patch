@@ -244,3 +244,55 @@ index 362b701..ef05608 100644
      add_protect(emuenv.mem, va, len, MemPerm::None, [va, len](Address fault_addr, bool write) {
          return abort_aware_fault_callback(fault_addr, write, va, len);
      });
+diff --git a/vita3k/modules/kubridge/kubridge.cpp b/vita3k/modules/kubridge/kubridge.cpp
+--- a/vita3k/modules/kubridge/kubridge.cpp
++++ b/vita3k/modules/kubridge/kubridge.cpp
+@@ -57,4 +57,8 @@ struct KuKernelExceptionHandlerOpt {
+     uint32_t size;
+ };
+ 
++struct KuKernelAbortHandlerOpt {
++    uint32_t size;
++};
++
+ // Page fault callback that triggers an abort handler if one is registered.
+@@ -134,4 +138,11 @@ EXPORT(SceUID, kuKernelMemReserve, Ptr<Ptr<void>> addr, SceSize size, SceKernelM
+     if (!allocated_addr)
+         return RET_ERROR(SCE_KERNEL_ERROR_NO_MEMORY);
+ 
++    // A reservation has no committed pages yet. DSVita relies on accesses to
++    // untouched holes such as its emulated I/O window reaching the abort handler.
++    add_protect(mem, allocated_addr, size, MemPerm::None,
++        [allocated_addr, size](Address fault_addr, bool write) {
++            return abort_aware_fault_callback(fault_addr, write, allocated_addr, size);
++        });
++
+     // Store the allocated address back
+@@ -228,4 +241,18 @@ EXPORT(int, kuKernelRegisterExceptionHandler, uint32_t exceptionType,
+     return 0;
+ }
+ 
++// Legacy kubridge 0.3.x data-abort API used by DSVita.
++EXPORT(int, kuKernelRegisterAbortHandler, Ptr<void> pHandler,
++    Ptr<Ptr<void>> pOldHandler, Ptr<KuKernelAbortHandlerOpt> pOpt) {
++    TRACY_FUNC(kuKernelRegisterAbortHandler, pHandler, pOldHandler, pOpt);
++
++    const Address old_handler = emuenv.kernel.exception_handlers[0].exchange(pHandler.address());
++    if (pOldHandler)
++        *pOldHandler.get(emuenv.mem) = Ptr<void>(old_handler);
++
++    LOG_INFO("kuKernelRegisterAbortHandler: handler=0x{:08X} old=0x{:08X}",
++        pHandler.address(), old_handler);
++    return 0;
++}
++
+ // kuKernelReleaseExceptionHandler — unregister exception handler.
+diff --git a/vita3k/nids/include/nids/nids.inc b/vita3k/nids/include/nids/nids.inc
+--- a/vita3k/nids/include/nids/nids.inc
++++ b/vita3k/nids/include/nids/nids.inc
+@@ -2503,4 +2503,5 @@ NID(kuKernelMemProtect, 0x566D2AF1)
+ NID(kuKernelMemReserve, 0xCED3608C)
+ NID(kuKernelMemCommit, 0x9C0CD758)
+ NID(kuKernelMemDecommit, 0x9BDF5881)
++NID(kuKernelRegisterAbortHandler, 0x799F5648)
+ NID(kuKernelRegisterExceptionHandler, 0xF9025D19)
