@@ -801,3 +801,30 @@ CPU PCs, and IRQ state matched. At frame 600 main RAM continued changing while
 the touched OAM state remained stable. The prompt consumed input and both CPUs
 continued their normal IRQ wait loop; Vita3K is failing to present later direct
 texture updates, rather than the game failing to boot past the logo.
+
+### 2026-07-26: texture-memory coherence probes
+
+A temporary probe in Vita3K's cached-texture path hashed the 256x1 OAM texture
+on every bind. The five bounded texture addresses initially all produced the
+same hash (`04ec7d89bb2b089c`, the zero-filled buffer hash) with
+`upload=false`, even though DSVita's frame diagnostics showed changing OAM.
+The hash eventually changed once, but every backing then remained on the same
+new value rather than tracking subsequent guest writes. This confirms stale
+guest-memory visibility below VitaGL's texture cache identity logic.
+
+Two possible workarounds were tested and rejected:
+
+- Selecting VitaGL's ordinary RAM pool instead of CDRAM changed the texture
+  addresses from the `0x60...` range to `0x70...`, but Vita3K continued to see
+  the same stale hashes and the viewport stayed black.
+- Disabling Vita3K's Vulkan memory mapping instead of using its default
+  `double-buffer` mode also left the viewport black and the cached OAM data
+  stale. It additionally made no useful CPU-visible GXM framebuffer readback
+  available.
+
+Neither experiment is retained in DSVita. The evidence now points at how
+Vita3K observes CPU-written GXM allocations (or when it synchronizes those
+writes), not the CDRAM allocator or the selected Vulkan mapping mode. The next
+probe should compare a hash computed by DSVita directly from each newly written
+texture pointer with Vita3K's hash of that exact guest address, then trace the
+guest-address-to-host-pointer conversion used by `hash_texture_data`.
