@@ -519,3 +519,38 @@ The Vita3K path remains a desktop correctness oracle. Real Vita hardware uses
 kubridge's native abort machinery and should keep the fast ARM-to-ARM JIT; do
 not replace it with an all-slow-memory renderer or interpreter based on this
 host-emulator limitation.
+
+### 2026-07-26: Vita3K reaches the translated IPC loop
+
+The callback-return failure was two separate Dynarmic integration gaps. First,
+Vita3K must stop Dynarmic with `HaltReason::MemoryAbort`, not its generic user
+halt. Second, the A32 JIT must enable `check_halt_on_memory_access`; that option
+emits a checkpoint after each memory operation which records the current guest
+instruction PC before returning to Vita3K. Without it, the abort context held
+the end-of-block PC (`0x98000074`) and DSVita could not find the metadata for
+the faulting translated instruction.
+
+With both changes, the same access produces this verified sequence:
+
+```text
+DABT handler=0x81009E35 FAR=0xB4000208 PC=0x98000040
+vita3k abort #0 cpu=ARM9 addr=b4000208 pc=98000038 handled=true
+IPCSYNCWRITE#0 cpu=ARM7 mask=ffff value=0800
+VBLANKHASH#60 ... arm9=pc:02034198 ...
+```
+
+This proves that Vita3K now passes a coherent legacy kubridge abort context to
+DSVita, DSVita patches the corresponding ARM-to-ARM JIT memory operation, and
+both emulated DS CPUs continue into the startup IPC/VBlank loop. The screen is
+still unchanged at frame 300. ARM9 reads the remote nibble as 7 but remains in
+the polling routine at `0x02034168..0x020341bc`.
+
+The next compatibility gap is protection lifetime. Vita3K's
+`handle_access_violation` temporarily unprotects and removes an entire protected
+segment after one host fault. Native kubridge can return directly to code that
+the abort handler patched, while Vita3K delays the guest callback until after
+Dynarmic exits. A simple immediate page re-protect was tested and rejected: it
+also trapped Vita3K/DSVita slow-handler accesses and did not advance ARM9. The
+next implementation should preserve the original protection metadata and
+distinguish translated fastmem accesses from emulator-side accesses, rather
+than globally applying `mprotect` again after the callback.

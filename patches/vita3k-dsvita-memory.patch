@@ -296,3 +296,115 @@ diff --git a/vita3k/nids/include/nids/nids.inc b/vita3k/nids/include/nids/nids.i
  NID(kuKernelMemDecommit, 0x9BDF5881)
 +NID(kuKernelRegisterAbortHandler, 0x799F5648)
  NID(kuKernelRegisterExceptionHandler, 0xF9025D19)
+diff --git a/vita3k/cpu/include/cpu/functions.h b/vita3k/cpu/include/cpu/functions.h
+--- a/vita3k/cpu/include/cpu/functions.h
++++ b/vita3k/cpu/include/cpu/functions.h
+@@ -30,4 +30,5 @@ CPUStatePtr init_cpu(bool cpu_opt, SceUID thread_id, std::size_t processor_id, M
+ int run(CPUState &state);
+ int step(CPUState &state);
+ void stop(CPUState &state);
++void stop_memory_abort(CPUState &state);
+ void set_thread_id(CPUState &state, SceUID thread_id);
+diff --git a/vita3k/cpu/include/cpu/impl/dynarmic_cpu.h b/vita3k/cpu/include/cpu/impl/dynarmic_cpu.h
+--- a/vita3k/cpu/include/cpu/impl/dynarmic_cpu.h
++++ b/vita3k/cpu/include/cpu/impl/dynarmic_cpu.h
+@@ -52,4 +52,5 @@ public:
+     ~DynarmicCPU() override;
+     int run() override;
+     void stop() override;
++    void stop_memory_abort() override;
+ 
+diff --git a/vita3k/cpu/include/cpu/impl/interface.h b/vita3k/cpu/include/cpu/impl/interface.h
+--- a/vita3k/cpu/include/cpu/impl/interface.h
++++ b/vita3k/cpu/include/cpu/impl/interface.h
+@@ -27,4 +27,5 @@ public:
+ 
+     virtual int run() = 0;
+     virtual void stop() = 0;
++    virtual void stop_memory_abort() = 0;
+ 
+diff --git a/vita3k/cpu/src/cpu.cpp b/vita3k/cpu/src/cpu.cpp
+--- a/vita3k/cpu/src/cpu.cpp
++++ b/vita3k/cpu/src/cpu.cpp
+@@ -64,4 +64,8 @@ void stop(CPUState &state) {
+     state.cpu->stop();
+ }
+ 
++void stop_memory_abort(CPUState &state) {
++    state.cpu->stop_memory_abort();
++}
++
+ uint32_t read_reg(CPUState &state, size_t index) {
+diff --git a/vita3k/cpu/src/dynarmic_cpu.cpp b/vita3k/cpu/src/dynarmic_cpu.cpp
+--- a/vita3k/cpu/src/dynarmic_cpu.cpp
++++ b/vita3k/cpu/src/dynarmic_cpu.cpp
+@@ -343,4 +343,5 @@ std::unique_ptr<Dynarmic::A32::Jit> DynarmicCPU::make_jit() {
+         config.fastmem_pointer = std::bit_cast<uintptr_t>(parent->mem->memory.get());
+     }
+     config.hook_hint_instructions = true;
++    config.check_halt_on_memory_access = true;
+     config.enable_cycle_counting = false;
+@@ -419,4 +420,8 @@ void DynarmicCPU::stop() {
+     jit->HaltExecution();
+ }
+ 
++void DynarmicCPU::stop_memory_abort() {
++    jit->HaltExecution(Dynarmic::HaltReason::MemoryAbort);
++}
++
+ uint32_t DynarmicCPU::get_reg(uint8_t idx) {
+diff --git a/vita3k/kernel/src/thread.cpp b/vita3k/kernel/src/thread.cpp
+--- a/vita3k/kernel/src/thread.cpp
++++ b/vita3k/kernel/src/thread.cpp
+@@ -363,24 +363,31 @@ void ThreadState::dispatch_abort(CPUState &cpu) {
+-    // Build KuKernelAbortContext on guest stack for the handler to read.
+-    // Note: by the time we get here, the page has already been unprotected
+-    // by the protect_tree mechanism, and the CPU may have executed past
+-    // the faulting instruction. The handler is called as a notification;
+-    // we don't restore from AbortContext afterward.
+-    // { r0-r12, sp, lr, pc, FAR } = 17 uint32_t = 68 bytes
+-    const uint32_t ctx_size = 17 * 4;
++    // Complete legacy kubridge 0.3.x KuKernelAbortContext: 16 GPRs,
++    // 32 64-bit VFP registers, then SPSR/FPSCR/FPEXC/FSR/FAR/type.
++    constexpr uint32_t ctx_words = 86;
++    const uint32_t ctx_size = ctx_words * 4;
+     const uint32_t sp_orig = read_sp(cpu);
+-    const uint32_t sp_aligned = align_down(sp_orig - ctx_size, 8);
++    // Keep the saved context below the callback's working stack.
++    const uint32_t sp_aligned = align_down(sp_orig - 0x1000 - ctx_size, 8);
+ 
+     auto *ctx = Ptr<uint32_t>(sp_aligned).get(*cpu.mem);
++    std::fill_n(ctx, ctx_words, 0);
+     for (int i = 0; i < 13; i++)
+         ctx[i] = read_reg(cpu, i);
+-    ctx[13] = sp_aligned + ctx_size;
++    ctx[13] = sp_orig;
+     ctx[14] = read_lr(cpu);
+     ctx[15] = read_pc(cpu);
+-    ctx[16] = fault_addr;
++    ctx[84] = fault_addr;
++    ctx[85] = 0;
+ 
+     LOG_DEBUG("DABT handler=0x{:08X} FAR=0x{:08X} PC=0x{:08X} SP=0x{:08X} sp_aligned=0x{:08X}",
+         handler, fault_addr, ctx[15], sp_orig, sp_aligned);
+ 
+     // run_callback saves/restores full CPU context internally
+     run_callback(handler, { sp_aligned });
++
++    // Apply the abort handler's edited context, including its retry PC.
++    for (int i = 0; i < 13; i++)
++        write_reg(cpu, i, ctx[i]);
++    write_sp(cpu, ctx[13]);
++    write_reg(cpu, 14, ctx[14]);
++    write_pc(cpu, ctx[15]);
+ }
+diff --git a/vita3k/modules/kubridge/kubridge.cpp b/vita3k/modules/kubridge/kubridge.cpp
+--- a/vita3k/modules/kubridge/kubridge.cpp
++++ b/vita3k/modules/kubridge/kubridge.cpp
+@@ -67,5 +67,5 @@ static bool abort_aware_fault_callback(Address fault_addr, bool write, Address r
+         cpu->abort_fault_addr.store(fault_addr);
+         cpu->abort_is_write.store(write);
+         cpu->abort_pending.store(true);
+-        stop(*cpu); // HaltExecution — signal-safe (atomic only)
++        stop_memory_abort(*cpu); // Preserve the faulting guest PC in Dynarmic.
+     }
