@@ -672,3 +672,30 @@ new crash workaround was committed. The next useful trace point is the ARM9
 guest-context exit itself: record the last translated block/indirect PC store
 that precedes the top-level return, without adding logging on the hot return
 path.
+
+### 2026-07-26: Vita3K canonical-memory execution path
+
+The ARM9 zero-PC transition was a `pop {r3,pc}` at `0x02031270`. Its stack
+return word was already zero even though LR and the translator's shadow return
+stack both held `0x020310cc`. A targeted trace of the matching compiled
+`push {r3,lr}` proved that LR was correct in its host register but the write
+through DSVita's mirrored fast-memory mapping was not visible through the
+canonical DS memory view. This identifies Vita3K kubridge alias coherence, not
+ARM decode or ROM state, as the source of the false return.
+
+The Vita3K feature now keeps ordinary blocks in DSVita's existing interpreter
+(`INTERP_THRESHOLD = 255`), while real Vita builds retain the ARM-to-ARM JIT.
+ARM9 HLE/overlay gates still compile where required. ARM7's OS IRQ handler no
+longer gets forced through the compiler: unlike ARM9 it has no HLE replacement,
+so the old gate was unnecessary. With those changes Rhythm Heaven passes the
+zero-PC loop and performs both ARM7 and ARM9 IPCSYNC initialization writes.
+
+The next abort came from the ARM9 HLE IRQ handler itself. It used raw
+`mmu_tcm_addr + guest_addr` pointer dereferences for the IRQ stack and function
+table. Those accesses occur outside translated code and therefore cannot use
+the JIT abort patcher. They now use `mem_write`/`mem_read`, allowing execution
+to advance into game GX FIFO writes. The remaining crash is another Vita3K
+kubridge mapping: `FastFixedFifo` uses a double-mapped `VirtualMem` ring, and
+its native FIFO address (`0x8044d000` in the observed run) is unmapped when the
+first geometry commands arrive. A portable mirrored-buffer fallback is the
+next implementation target.
