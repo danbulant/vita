@@ -828,3 +828,26 @@ writes), not the CDRAM allocator or the selected Vulkan mapping mode. The next
 probe should compare a hash computed by DSVita directly from each newly written
 texture pointer with Vita3K's hash of that exact guest address, then trace the
 guest-address-to-host-pointer conversion used by `hash_texture_data`.
+
+That direct comparison subsequently disproved the stale-pointer interpretation.
+For engine B OAM, DSVita and Vita3K produced identical XXH32 values at each
+exact guest address: for example `0x602a3010` changed from `6ac09205` to
+`920332b4` on both sides. At the same time, Vita3K's `XXH3_64bits` result stayed
+at `04ec7d89bb2b089c`, so its texture cache did not request an upload.
+
+Replacing the disposable Vita3K build's one-shot texture hash with XXH64 made
+the cache detect later changes. A further OAM transition changed all five
+backings from `2419da294f667a03` to `0770195b1638f032`, each with
+`upload=true`. An empty compiler memory barrier before the dispatched XXH3 call
+did not fix its frozen result. The likely cause is optimization around xxHash's
+`pure` function annotation: guest JIT writes are not visible as C++ writes, so
+the compiler is permitted to reuse the old result. Calling a non-pure wrapper,
+using an inline implementation with an appropriate memory clobber, or using a
+different hash avoids that false cache hit.
+
+Correct change detection alone did not restore post-logo presentation; the
+viewport remained black after the uploads. It is nevertheless a concrete
+Vita3K texture-cache correctness bug and removes guest-memory aliasing as the
+explanation for these buffers. The next renderer probe should inspect whether
+`upload_texture` replaces the Vulkan image/descriptor for already configured
+textures, and should cover the larger BG/OBJ textures rather than OAM alone.
