@@ -909,3 +909,31 @@ produces the same blue checker and missing logo. This rules out the main GPU
 background decoder as the only remaining cause and leaves shared blend/palette
 state or guest render inputs as the next renderer boundary. It also provides a
 reusable CPU/GPU discriminator for other games.
+
+### 2026-07-26: ARM-to-ARM translator boundary in Vita3K
+
+The Vita ARM32 backend was forced on at a one-execution threshold to test real
+guest-code translation, with every emitted fast-memory window proactively
+rewritten to DSVita's existing generic slow-memory handler. The experiment did
+enter native blocks for both CPUs. It then stalled in an early ARM7 block, so a
+second run kept ARM7 entirely in the flat interpreter and translated ARM9 only.
+
+The ARM9-only run compiled a sequence of boot blocks and advanced through DS IPC
+startup, but subsequently sent ARM7 to the impossible guest PC `0xe2000000`.
+This demonstrates that the ARM-to-ARM backend itself is reachable under Vita3K,
+while translated ARM9 memory effects are not yet safe. The likely boundary is
+Vita3K's separation between kubridge's fixed guest alias and its canonical
+Dynarmic memory, or an ABI mismatch in the proactively patched slow-memory
+windows.
+
+A final diagnostic allowed native publication only for blocks with no recorded
+guest-memory operations and permanently interpreted rejected blocks. That
+avoided the invalid ARM7 PC but stopped during IPC startup rather than reaching
+video frames. Even memory-free blocks therefore cannot yet be assumed safe in
+isolation; native call/return or scheduler interaction also needs tracing.
+
+These translator probes were deliberately not retained. The stable Vita3K
+profile remains interpreter-only (`INTERP_THRESHOLD = 255`) and still reaches
+the interactive game screen. Future work should compare the ARM32 block-entry,
+return-stack, and slow-memory calling conventions against a real Vita run before
+enabling translated game code by default.
