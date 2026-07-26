@@ -647,3 +647,28 @@ passes both earlier failures, remains alive, and reaches `VBLANKHASH#60` plus
 milestone was observed during the test window, so game boot is not complete;
 the next investigation starts from the now-stable VBlank loop rather than a
 host crash.
+
+### 2026-07-26: black-frame ARM9 state trace
+
+The frame-60 register probe confirms that the black output is genuine guest
+state rather than a Vita3K presentation failure. Both display-control banks,
+interrupt masks, and IPC registers remain zero. ARM7 is executing valid code
+near `0x02380028`, but ARM9 is walking zero-filled low memory near
+`0x00000fa0`; the loaded ROM header's real ARM9 entry is `0x02000800`.
+
+Release-active route probes ruled out a normal translated immediate branch,
+register branch, exception vector, or JIT helper call to low memory. At startup
+ARM9's saved PC is correctly `0x02000800`. After 1838 scheduler cycles it is
+exactly `0x00000000` before the next top-level `execute()` call, which then
+compiles sequential zero blocks (`0x00000000`, `0x000007d0`, `0x00000fa0`,
+and onward). This also rules out the earlier theory that only the
+`0x02000000` region bits were lost from a valid ITCM target.
+
+Temporary guards around ARM7 execution did not report ARM7 changing the ARM9
+PC directly, so they were removed rather than retained as a masking fix. Two
+instrumented Vita3K runs also hit a separate nondeterministic host SIGSEGV in
+an invalid exclusive-access loop before returning enough inner-JIT state; no
+new crash workaround was committed. The next useful trace point is the ARM9
+guest-context exit itself: record the last translated block/indirect PC store
+that precedes the top-level return, without adding logging on the hot return
+path.
