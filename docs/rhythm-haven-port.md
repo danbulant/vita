@@ -593,3 +593,27 @@ nix-shell -p binutils --run \
 
 The software-protection experiment remains outside the checked-in Vita3K patch
 until the alias correction is rebuilt and shown to advance the actual title.
+
+### 2026-07-26: ARM32 mid-block dispatch and ITCM mirrors
+
+The failing ARM32 helper assumed that an entry PC mismatch could be converted
+directly into a dense `GuestInstOffset` index. The observed delta
+`0x8000001f` violated that assumption and let generated code read beyond the
+metadata vector. The helper now records each instruction's guest PC and
+resolves the requested target explicitly. A missing target produces a bounded
+diagnostic instead of corrupting host state.
+
+That diagnostic exposed the concrete alias: ARM9 requested `0x000084d0`, while
+the compiled block metadata covered `0x00000004..0x000007cc`. ARM9 ITCM is 32
+KiB, so `0x84d0` is the mirror of `0x04d0`. DSVita's AArch64 backend already
+folded ITCM entry PCs with `ITCM_SIZE - 1`; the ARM32 resolver now applies the
+same CPU-specific rule. It also preserves the existing top-nibble DS memory
+mirror collapse and checks the ARM/Thumb tag before entering a cached block.
+
+The Vita release build succeeds with the Vita3K feature. In the persistent
+software-protection Vita3K experiment, the corrected build passes the former
+`0x84d0` panic, completes the large protection-page installation, and reaches
+an ARM7 IPCSYNC read. Roughly seven seconds later it enters a new bad state at
+guest PC `0x810062dc`, reads `0x00000e58`, and then branches to PC zero. This is
+later than the prior failure and is now the next translator/runtime boundary;
+the ITCM fold itself is retained as a verified correction.
