@@ -884,3 +884,28 @@ The reusable source changes are now included in
 `patches/vita3k-dsvita-memory.patch`. The patch applies cleanly to Vita3K PR
 3958 commit `d66ef47`; no Vita3K executable or other generated binary is stored
 in this repository.
+
+### 2026-07-26: normalized Vita3K background gathers
+
+Vita3K active-shader dumps identified another renderer boundary. Shacc compiles
+DSVita's `usampler2D` `tex2D_gather4` reads as F32 texture instructions whose
+destination register bits are subsequently treated as packed DS VRAM bytes.
+Vita3K lowers those instructions to normalized Vulkan float gathers. The shader
+therefore shifted and masked IEEE float bit patterns instead of the four source
+bytes.
+
+The Vita3K feature now prefixes runtime Cg shaders with `VITA3K`. Its background
+memory sampler uses normalized RGBA gathers and explicitly reconstructs each
+byte with `round(channel * 255)`. Native Vita shaders retain the original raw
+integer gather. The title background changed from sparse cyan blocks to a
+continuous checker pattern with the correct tile geometry. A melonDS run of the
+same ROM provides the reference capture: the checker should be cyan and the
+left/top DS screen should contain the Rhythm Heaven logo, so visual correctness
+is still incomplete.
+
+The existing CPU 2D renderer was also made selectable in Vita3K release builds
+with `DSVITA_SOFT_2D=1`. It now runs without the earlier shader crash, but
+produces the same blue checker and missing logo. This rules out the main GPU
+background decoder as the only remaining cause and leaves shared blend/palette
+state or guest render inputs as the next renderer boundary. It also provides a
+reusable CPU/GPU discriminator for other games.
