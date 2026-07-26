@@ -699,3 +699,26 @@ kubridge mapping: `FastFixedFifo` uses a double-mapped `VirtualMem` ring, and
 its native FIFO address (`0x8044d000` in the observed run) is unmapped when the
 first geometry commands arrive. A portable mirrored-buffer fallback is the
 next implementation target.
+
+### 2026-07-26: first rendered game boot in Vita3K
+
+`FastFixedFifo` now has a Vita3K-only ordinary allocation backend. It allocates
+two FIFO spans and mirrors every insertion into both halves, preserving the
+contiguous wraparound window that the geometry command consumer expects without
+using kubridge double mappings. Real Vita and non-Vita3K builds keep the
+original `Shm`/`VirtualMem` implementation and its SIMD bulk-copy path.
+
+This removes the native GX FIFO abort. The run remains alive through at least
+frame 300, with both CPUs halted normally waiting for enabled interrupts,
+nonzero display registers (`DISPCNT 0x0021101c`), and changing main-memory,
+VRAM, palette, OAM, and renderer UBO hashes. A Hyprland capture shows actual
+Rhythm Heaven artwork and text in the DS viewport. Composition is visibly
+incorrect (dark tiles, displaced/rotated strips, and a partially assembled
+graphic), and the interpreter profile runs around 3-4 FPS, but the title has
+advanced from boot firmware/IPC into rendered game code.
+
+The next phase is renderer correctness followed by selective ARM32 JIT
+re-enablement. The interpreter should remain the Vita3K reference path until
+Vita3K's kubridge aliases become coherent; individual safe blocks or memory
+operations can then be promoted back to the ARM-to-ARM translator and compared
+against the canonical-memory frame hashes.
