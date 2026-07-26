@@ -617,3 +617,33 @@ an ARM7 IPCSYNC read. Roughly seven seconds later it enters a new bad state at
 guest PC `0x810062dc`, reads `0x00000e58`, and then branches to PC zero. This is
 later than the prior failure and is now the next translator/runtime boundary;
 the ITCM fold itself is retained as a verified correction.
+
+### 2026-07-26: split ARM7/ARM9 alternate-entry policy
+
+A release-active JIT-entry guard showed that the later `0x00000e58` read was
+not itself a code pointer. ARM7's saved PC had already become `0x0a96472c`;
+the JIT map then derived slot `0x00000e58` from that invalid guest PC. Focused
+metadata logging traced the corruption back to repeated ARM7 mid-block entry
+at `0x02380034`.
+
+Replacing all ARM32 mid-block restores with fresh compilation was safe for
+ARM7 but unsuitable for ARM9. ARM9 blocks crossed the 32 KiB ITCM boundary and
+continually replaced the shared mirror slots, compiling `0x84d0`, `0x8ca0`,
+`0x9470`, and so on. Canonicalizing only the block start still allowed decoded
+ranges to overlap and thrash the table.
+
+The validated policy is therefore CPU-specific:
+
+- ARM7 unwinds the containing block and compiles an exact alternate entry,
+  avoiding fragile allocator-state restoration.
+- ARM9 retains metadata restoration and explicitly folds ITCM mirrors, which
+  is required to enter loops inside the shared physical ITCM image.
+- JIT table dispatch now rejects invalid low slot and entry pointers before an
+  indirect call can amplify corrupted state.
+
+Under Vita3K's persistent software-protection experiment this split build
+passes both earlier failures, remains alive, and reaches `VBLANKHASH#60` plus
+`FRAMEDUMP#60`. The rendered DS framebuffer is still black and no later frame
+milestone was observed during the test window, so game boot is not complete;
+the next investigation starts from the now-stable VBlank loop rather than a
+host crash.
