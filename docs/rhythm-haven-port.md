@@ -938,7 +938,7 @@ the interactive game screen. Future work should compare the ARM32 block-entry,
 return-stack, and slow-memory calling conventions against a real Vita run before
 enabling translated game code by default.
 
-### 2026-07-26: complete title graphics in Vita3K
+### 2026-07-26: gather reconstruction clean-cache qualification
 
 The remaining checker pattern was not a palette or VRAM-state error. Shacc's
 four-output `tex2D_gather4` returns one four-neighbour vector for each RGBA
@@ -953,14 +953,52 @@ of all four gathers: `values[0][0]`, `values[1][0]`, `values[2][0]`, and
 reads; native Vita keeps its original integer samplers and packed register
 representation.
 
-The resulting Vita3K frame matches the melonDS title reference: both circular
+One run produced a frame matching the melonDS title reference: both circular
 backgrounds, the Rhythm Heaven logo, stars, copyright text, and the interactive
-touch prompt are present with the expected colors and layout. This is the first
-visually complete game screen in the Vita build. The GPU renderer remains slow
-under the interpreter-only Vita3K compatibility profile, around 5-6 FPS.
+touch prompt were present. Repeated runs after deleting DSVita's VitaGL shader
+cache did not reproduce that result, however. Neighbour zero produces corrupted
+vertical strips, neighbours one and two plus direct texel-centre sampling put
+the title data in a narrow edge strip, and neighbour three produces a blank
+cyan layer. The complete frame was therefore an intermediate/stale shader-cache
+result and is not evidence that the gather ordering is solved.
+
+The committed neighbour-zero reconstruction remains the least regressive
+baseline while the precise Shacc-to-Vulkan sampling convention is traced. The
+prompt, Nintendo logo, live title state, and touch response remain reproducible,
+but the main title background is not yet correct. The GPU renderer also remains
+slow under the interpreter-only Vita3K compatibility profile, around 5-6 FPS.
 
 `DSVITA_SOFT_2D=1` still renders corrupted vertical tile strips under Vita3K.
 That independent diagnostic now points at its CPU layer construction/upload
 path (possibly emulated NEON), not shared palette state, and is not used by the
-working profile. Both the `vita3k` VPK and the normal native-Vita VPK compile
-successfully after the shader correction.
+working profile. Both the `vita3k` VPK and the normal native-Vita VPK compiled
+successfully at the neighbour-zero checkpoint; they are rebuilt again after
+each retained translator change.
+
+### 2026-07-26: executable memory and translator return experiments
+
+A Vita3K-only startup self-test now separates generated-code publication from
+DS guest translation. It allocates one executable page, writes ARM `mov r0,
+#42; bx lr`, flushes the instruction cache, calls it, rewrites the immediate to
+43, flushes again, and calls it again. Repeated Vita3K runs report
+`VITA3K_CODEGEN first=42 second=43`. Executable mappings, initial publication,
+and cache invalidation after rewriting are therefore functional in isolation.
+
+Guest-PC tracing identified two useful ARM9 return cases in Rhythm Heaven:
+`0x02031c5c` restores the CPSR interrupt state before `bx lr`, while
+`0x0203ba38` is a plain `bx lr`. The normal ARM32 backend tail-calls DSVita's
+Rust `branch_lr` helper. Under Vita3K the helper was entered and updated cycles,
+PC, and Thumb state, but its tail return did not reliably complete. A diagnostic
+normal-call sequence (`push {r12, lr}; blx helper; pop {r12, lr}; bx lr`) with
+eight-byte stack alignment did return to the compiler driver. This narrows one
+failure to the generated-code/helper return convention rather than instruction
+cache coherence.
+
+Publishing apparently harmless leaf blocks is still unsafe. A call-target
+filter excluded mid-function returns such as `0x02030c44`, but enabling even a
+standalone `bx lr` function at `0x0202d56c` eventually stalled boot. Likewise,
+ARM9-only memory-free blocks stop in SDK IPC, while broad slow-memory rewriting
+can corrupt ARM7's PC to `0xe2000000`. These publication experiments were
+reverted and `INTERP_THRESHOLD = 255` remains the stable policy. The next
+translator work must preserve the compiler driver's complete block-entry and
+return contract instead of classifying instructions alone.
