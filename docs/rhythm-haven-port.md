@@ -554,3 +554,42 @@ also trapped Vita3K/DSVita slow-handler accesses and did not advance ARM9. The
 next implementation should preserve the original protection metadata and
 distinguish translated fastmem accesses from emulator-side accesses, rather
 than globally applying `mprotect` again after the callback.
+
+### 2026-07-26: persistent protection prototype and translator alias boundary
+
+DSVita calls `kuKernelFlushCaches` after rewriting a generated ARM instruction.
+Vita3K previously treated this as a host CPU cache no-op, but its guest Dynarmic
+cache can still contain the old instruction. The compatibility patch now maps
+that export to `KernelState::invalidate_jit_cache` for the supplied guest range.
+This is required for self-modifying guest JIT code, although it did not pass the
+Rhythm Heaven IPC handshake by itself.
+
+A Vita3K-only persistent-protection prototype retained protection metadata,
+made the underlying host mappings accessible to emulator code, disabled
+Dynarmic fastmem, and checked guest reads/writes in Dynarmic callbacks. It
+successfully dispatched and returned from the first ARM9 abort, proving that
+the approach can distinguish translated accesses from DSVita's slow handlers.
+It is not yet included in the maintained patch: after DSVita installed its full
+page set, execution reached a pre-existing translator failure also present in
+older Vita3K runs.
+
+Symbolizing guest PC `0x81017e14` against the release ELF identifies
+`jump_to_other_guest_pc`. Its incoming in-block byte delta was `0x8000001f` and
+using it directly indexes outside the block's `GuestInstOffset` vector before
+eventually reading address zero. A narrow attempt to clear bit 31 before the
+index calculation was rebuilt and tested. It selected a wrong offset earlier,
+corrupted DSVita state before abort registration, then ended in an invalid
+exclusive-access loop and Vita3K SIGSEGV. The bit is therefore not a disposable
+tag at this boundary; a future fix must recover the canonical target and block
+page from metadata before calculating their instruction delta.
+
+Useful reproduction command:
+
+```sh
+nix-shell -p binutils --run \
+  'addr2line -afiCe target/armv7-sony-vita-newlibeabihf/release/dsvita.elf 0x81017e14'
+# Result: dsvita::jit::jit_asm::jump_to_other_guest_pc<ARM7>
+```
+
+The software-protection experiment remains outside the checked-in Vita3K patch
+until the alias correction is rebuilt and shown to advance the actual title.

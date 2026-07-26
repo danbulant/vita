@@ -268,7 +268,7 @@ diff --git a/vita3k/modules/kubridge/kubridge.cpp b/vita3k/modules/kubridge/kubr
 +        });
 +
      // Store the allocated address back
-@@ -228,4 +241,18 @@ EXPORT(int, kuKernelRegisterExceptionHandler, uint32_t exceptionType,
+@@ -228,4 +241,25 @@ EXPORT(int, kuKernelRegisterExceptionHandler, uint32_t exceptionType,
      return 0;
  }
  
@@ -284,6 +284,13 @@ diff --git a/vita3k/modules/kubridge/kubridge.cpp b/vita3k/modules/kubridge/kubr
 +    LOG_INFO("kuKernelRegisterAbortHandler: handler=0x{:08X} old=0x{:08X}",
 +        pHandler.address(), old_handler);
 +    return 0;
++}
++
++EXPORT(void, kuKernelFlushCaches, const void *ptr, SceSize len) {
++    TRACY_FUNC(kuKernelFlushCaches, ptr, len);
++    const Address addr = static_cast<Address>(reinterpret_cast<uintptr_t>(ptr));
++    if (addr && len)
++        emuenv.kernel.invalidate_jit_cache(addr, len);
 +}
 +
  // kuKernelReleaseExceptionHandler — unregister exception handler.
