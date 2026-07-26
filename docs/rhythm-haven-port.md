@@ -764,3 +764,40 @@ Vita3K segfaults in its shader handling immediately after writing the newly
 compiled fragment shader to cache (`Unhandled access to 0x0`), before game
 execution begins. The experiment was reverted. The software renderer is not a
 drop-in Vita3K workaround without first reducing or correcting that shader.
+
+### 2026-07-26: bounded Vita3K texture backing
+
+The apparent title-screen corruption was traced to VitaGL texture remapping and
+Vita3K's 1,024-entry texture cache. DSVita calls `vglRemapTexPtr` for roughly a
+dozen VRAM, palette, OAM, and blend textures per frame. Each remap gives the GXM
+texture a fresh data address, so Vita3K creates hundreds of cache identities in
+seconds. Increasing the disposable Vita3K build's cache to 4,096 entries delayed
+the block corruption until the larger cache began recycling. Disabling the
+texture cache produced an entirely black viewport.
+
+Two additional experiments established the update semantics:
+
+- Keeping a single backing address rendered the initial contents but did not
+  expose later CPU writes to Vita3K.
+- Reusing two addresses avoided unbounded cache growth and rendered a clean,
+  rotated Nintendo logo. Re-uploading cached textures on every bind in the
+  disposable Vita3K build did not make the later game image appear.
+
+DSVita's Vita3K feature now uses `vglCycleTexPtr`, a bounded VitaGL helper that
+cycles each logical texture through five persistent mapped allocations. Five is
+one more than VitaGL's four-frame deferred-free window, so queued GPU work is not
+overwritten while the number of Vita3K cache identities remains bounded. Real
+Vita builds continue to use `vglRemapTexPtr`. This removes the stale/displaced
+strips and prevents cache churn from manufacturing a misleading old title
+image. The authoritative current output is a clean Nintendo logo followed by a
+black viewport through frame 300 and beyond.
+
+The black viewport is interactive rather than a CPU stall. An XWayland mouse
+press reached DSVita through Vita3K's front-touch emulation as raw Vita
+coordinates `(1442,560)`, mapped by DSVita to `(721,282)` in its 960x544 layout.
+At frame 300, the untouched run had `main=d113cf71`, `oam=63e81d4a`; the touched
+run had `main=bcc02c82`, `oam=8759ddfd`, while VRAM, palettes, display registers,
+CPU PCs, and IRQ state matched. At frame 600 main RAM continued changing while
+the touched OAM state remained stable. The prompt consumed input and both CPUs
+continued their normal IRQ wait loop; Vita3K is failing to present later direct
+texture updates, rather than the game failing to boot past the logo.
