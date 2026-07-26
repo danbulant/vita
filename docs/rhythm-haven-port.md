@@ -722,3 +722,45 @@ re-enablement. The interpreter should remain the Vita3K reference path until
 Vita3K's kubridge aliases become coherent; individual safe blocks or memory
 operations can then be promoted back to the ARM-to-ARM translator and compared
 against the canonical-memory frame hashes.
+
+### 2026-07-26: Vita3K renderer-backend comparison
+
+The final Vita framebuffer cannot currently be used as a CPU-side diagnostic in
+Vita3K. `vglGetTexDataPointer` returns the VitaGL texture allocation, but after
+GXM rendering the allocation is not synchronized back from the host GPU. A
+Vita3K-only dump of the 960x544 allocation contained only one nonzero byte even
+while the host window visibly showed game artwork. This also explains the
+stable `5aa01a83` frame hash: it describes stale CPU-visible storage, not the
+presented image. The probe was removed after confirming this limitation.
+
+The same build was tested with both Vita3K rendering backends under Hyprland:
+
+- Vulkan reaches recognizable Rhythm Heaven artwork, but with displaced strips,
+  missing/dark tiles, and incorrect composition. Vita3K logs `Mask not
+  implemented in the vulkan renderer!` while retrieving the VitaGL shaders.
+- OpenGL is substantially worse: after game startup it shows a purple rectangle
+  and horizontal scanlines instead of recognizable artwork. Its translated
+  shaders compile, with many warnings about parameters and temporary registers
+  potentially being used before initialization.
+
+Vulkan therefore remains the reference Vita3K backend. Web and upstream-history
+searches did not find a ready-made ARM7/ARM9-to-ARMv7 translator or a specific
+fix for this VitaGL rendering failure. Vita3K itself still describes the project
+as experimental, and its current pull-request list includes ongoing VitaGL
+compatibility work (base-vertex and ETC1 support), so backend gaps remain an
+active upstream area:
+
+- <https://github.com/Vita3K/Vita3K>
+- <https://github.com/Vita3K/Vita3K/pulls>
+
+The next useful discriminator is a renderer-stage capture before VitaGL/GXM, or
+a reduced 2D test that checks texture upload, integer texture sampling, uniform
+layout, and draw geometry independently. Host screenshots are authoritative for
+Vita3K until explicit GXM surface readback is implemented.
+
+The existing `Gpu2DSoftRenderer` was also tested as a possible shader-path
+bypass. Enabling it makes DSVita compile its `blend_new` Vita shader pair.
+Vita3K segfaults in its shader handling immediately after writing the newly
+compiled fragment shader to cache (`Unhandled access to 0x0`), before game
+execution begins. The experiment was reverted. The software renderer is not a
+drop-in Vita3K workaround without first reducing or correcting that shader.
