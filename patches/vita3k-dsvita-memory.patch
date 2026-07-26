@@ -1,11 +1,276 @@
+diff --git a/vita3k/cpu/include/cpu/functions.h b/vita3k/cpu/include/cpu/functions.h
+index e9a319f..5670145 100644
+--- a/vita3k/cpu/include/cpu/functions.h
++++ b/vita3k/cpu/include/cpu/functions.h
+@@ -30,6 +30,7 @@ CPUStatePtr init_cpu(bool cpu_opt, SceUID thread_id, std::size_t processor_id, M
+ int run(CPUState &state);
+ int step(CPUState &state);
+ void stop(CPUState &state);
++void stop_memory_abort(CPUState &state);
+ void set_thread_id(CPUState &state, SceUID thread_id);
+ SceUID get_thread_id(CPUState &state);
+ uint32_t read_reg(CPUState &state, size_t index);
+@@ -71,5 +72,6 @@ void set_log_code(CPUState &state, bool log);
+ void set_current_cpu_state(CPUState *state);
+ CPUState *get_current_cpu_state();
+ void set_log_mem(CPUState &state, bool log);
++void set_software_protection(CPUState &state, bool enabled);
+ bool get_log_code(CPUState &state);
+ bool get_log_mem(CPUState &state);
+diff --git a/vita3k/cpu/include/cpu/impl/dynarmic_cpu.h b/vita3k/cpu/include/cpu/impl/dynarmic_cpu.h
+index c739592..5da8bab 100644
+--- a/vita3k/cpu/include/cpu/impl/dynarmic_cpu.h
++++ b/vita3k/cpu/include/cpu/impl/dynarmic_cpu.h
+@@ -43,6 +43,7 @@ class DynarmicCPU : public CPUInterface {
+ 
+     bool log_mem = false;
+     bool log_code = false;
++    bool software_protection = false;
+     bool cpu_opt;
+ 
+     std::unique_ptr<Dynarmic::A32::Jit> make_jit();
+@@ -52,6 +53,7 @@ public:
+     ~DynarmicCPU() override;
+     int run() override;
+     void stop() override;
++    void stop_memory_abort() override;
+ 
+     uint32_t get_reg(uint8_t idx) override;
+     void set_reg(uint8_t idx, uint32_t val) override;
+@@ -87,6 +89,7 @@ public:
+     void trigger_breakpoint() override;
+     void set_log_code(bool log) override;
+     void set_log_mem(bool log) override;
++    void set_software_protection(bool enabled) override;
+     bool get_log_code() override;
+     bool get_log_mem() override;
+ 
+diff --git a/vita3k/cpu/include/cpu/impl/interface.h b/vita3k/cpu/include/cpu/impl/interface.h
+index 56c3457..d629258 100644
+--- a/vita3k/cpu/include/cpu/impl/interface.h
++++ b/vita3k/cpu/include/cpu/impl/interface.h
+@@ -27,6 +27,7 @@ struct CPUInterface {
+ 
+     virtual int run() = 0;
+     virtual void stop() = 0;
++    virtual void stop_memory_abort() = 0;
+ 
+     virtual uint32_t get_reg(uint8_t idx) = 0;
+     virtual void set_reg(uint8_t idx, uint32_t val) = 0;
+@@ -63,6 +64,7 @@ struct CPUInterface {
+     virtual void trigger_breakpoint() = 0;
+     virtual void set_log_code(bool log) = 0;
+     virtual void set_log_mem(bool log) = 0;
++    virtual void set_software_protection(bool enabled) = 0;
+     virtual bool get_log_code() = 0;
+     virtual bool get_log_mem() = 0;
+ 
+diff --git a/vita3k/cpu/src/cpu.cpp b/vita3k/cpu/src/cpu.cpp
+index 715c654..911de9c 100644
+--- a/vita3k/cpu/src/cpu.cpp
++++ b/vita3k/cpu/src/cpu.cpp
+@@ -64,6 +64,10 @@ void stop(CPUState &state) {
+     state.cpu->stop();
+ }
+ 
++void stop_memory_abort(CPUState &state) {
++    state.cpu->stop_memory_abort();
++}
++
+ uint32_t read_reg(CPUState &state, size_t index) {
+     return state.cpu->get_reg(index);
+ }
+@@ -148,6 +152,10 @@ void set_log_mem(CPUState &state, bool log) {
+     state.cpu->set_log_mem(log);
+ }
+ 
++void set_software_protection(CPUState &state, bool enabled) {
++    state.cpu->set_software_protection(enabled);
++}
++
+ bool get_log_code(CPUState &state) {
+     return state.cpu->get_log_code();
+ }
+diff --git a/vita3k/cpu/src/dynarmic_cpu.cpp b/vita3k/cpu/src/dynarmic_cpu.cpp
+index 8645471..a76d979 100644
+--- a/vita3k/cpu/src/dynarmic_cpu.cpp
++++ b/vita3k/cpu/src/dynarmic_cpu.cpp
+@@ -20,6 +20,7 @@
+ #include <cpu/state.h>
+ #include <util/log.h>
+ 
++#include <mem/functions.h>
+ #include <mem/ptr.h>
+ 
+ #include <dynarmic/frontend/A32/a32_ir_emitter.h>
+@@ -161,6 +162,8 @@ public:
+ 
+     template <typename T>
+     T MemoryRead(Dynarmic::A32::VAddr addr) {
++        if (cpu->software_protection && trigger_software_protection(*parent->mem, addr, false))
++            return 0;
+         Ptr<T> ptr{ addr };
+         if (!ptr || !ptr.valid(*parent->mem) || ptr.address() < parent->mem->host_page_size) {
+             LOG_ERROR("Invalid read of uint{}_t at address: 0x{:x}\n{}", sizeof(T) * 8, addr, this->cpu->save_context().description());
+@@ -198,6 +201,8 @@ public:
+ 
+     template <typename T>
+     void MemoryWrite(Dynarmic::A32::VAddr addr, T value) {
++        if (cpu->software_protection && trigger_software_protection(*parent->mem, addr, true))
++            return;
+         Ptr<T> ptr{ addr };
+         if (!ptr || !ptr.valid(*parent->mem) || ptr.address() < parent->mem->host_page_size) {
+             LOG_ERROR("Invalid write of uint{}_t at addr: 0x{:x}, val = 0x{:x}\n{}", sizeof(T) * 8, addr, value, this->cpu->save_context().description());
+@@ -336,13 +341,14 @@ std::unique_ptr<Dynarmic::A32::Jit> DynarmicCPU::make_jit() {
+     Dynarmic::A32::UserConfig config{};
+     config.arch_version = Dynarmic::A32::ArchVersion::v7;
+     config.callbacks = cb.get();
+-    if (parent->mem->use_page_table) {
++    if (parent->mem->use_page_table && !software_protection) {
+         config.page_table = (log_mem || !cpu_opt) ? nullptr : reinterpret_cast<decltype(config.page_table)>(parent->mem->page_table.get());
+         config.absolute_offset_page_table = true;
+-    } else if (!log_mem && cpu_opt) {
++    } else if (!software_protection && !log_mem && cpu_opt) {
+         config.fastmem_pointer = std::bit_cast<uintptr_t>(parent->mem->memory.get());
+     }
+     config.hook_hint_instructions = true;
++    config.check_halt_on_memory_access = true;
+     config.enable_cycle_counting = false;
+     config.global_monitor = &shared_monitor;
+     config.coprocessors[15] = cp15;
+@@ -407,6 +413,15 @@ void DynarmicCPU::set_log_mem(bool log) {
+     jit = make_jit();
+ }
+ 
++void DynarmicCPU::set_software_protection(bool enabled) {
++    if (software_protection == enabled)
++        return;
++    const CPUContext context = save_context();
++    software_protection = enabled;
++    jit = make_jit();
++    load_context(context);
++}
++
+ bool DynarmicCPU::get_log_code() {
+     return log_code;
+ }
+@@ -419,6 +434,10 @@ void DynarmicCPU::stop() {
+     jit->HaltExecution();
+ }
+ 
++void DynarmicCPU::stop_memory_abort() {
++    jit->HaltExecution(Dynarmic::HaltReason::MemoryAbort);
++}
++
+ uint32_t DynarmicCPU::get_reg(uint8_t idx) {
+     return jit->Regs()[idx];
+ }
+diff --git a/vita3k/kernel/include/kernel/state.h b/vita3k/kernel/include/kernel/state.h
+index de27351..21f3ff2 100644
+--- a/vita3k/kernel/include/kernel/state.h
++++ b/vita3k/kernel/include/kernel/state.h
+@@ -184,6 +184,7 @@ struct KernelState {
+     void request_process_exit(int res, std::optional<AppLaunchRequest> relaunch = std::nullopt);
+ 
+     void set_memory_watch(bool enabled);
++    void set_software_protection(bool enabled);
+     void invalidate_jit_cache(Address start, size_t length);
+     SceKernelModuleInfo *find_module_by_addr(Address address);
+ 
+diff --git a/vita3k/kernel/src/kernel.cpp b/vita3k/kernel/src/kernel.cpp
+index d36f8c3..983205e 100644
+--- a/vita3k/kernel/src/kernel.cpp
++++ b/vita3k/kernel/src/kernel.cpp
+@@ -138,6 +138,12 @@ void KernelState::invalidate_jit_cache(Address start, size_t length) {
+     }
+ }
+ 
++void KernelState::set_software_protection(bool enabled) {
++    std::lock_guard<std::mutex> lock(mutex);
++    for (const auto &[_, thread] : threads)
++        ::set_software_protection(*thread->cpu, enabled);
++}
++
+ ThreadStatePtr KernelState::get_thread(SceUID thread_id) {
+     return lock_and_find(thread_id, threads, mutex);
+ }
+diff --git a/vita3k/kernel/src/thread.cpp b/vita3k/kernel/src/thread.cpp
+index cad36c0..f143cf5 100644
+--- a/vita3k/kernel/src/thread.cpp
++++ b/vita3k/kernel/src/thread.cpp
+@@ -360,29 +360,40 @@ void ThreadState::dispatch_abort(CPUState &cpu) {
+     if (!handler)
+         return;
+ 
+-    // Build KuKernelAbortContext on guest stack for the handler to read.
+-    // Note: by the time we get here, the page has already been unprotected
+-    // by the protect_tree mechanism, and the CPU may have executed past
+-    // the faulting instruction. The handler is called as a notification;
+-    // we don't restore from AbortContext afterward.
+-    // { r0-r12, sp, lr, pc, FAR } = 17 uint32_t = 68 bytes
+-    const uint32_t ctx_size = 17 * 4;
++    // Build the complete legacy KuKernelAbortContext used by kubridge 0.3.x:
++    // 16 GPRs, 32 64-bit VFP registers, then SPSR/FPSCR/FPEXC/FSR/FAR/type.
++    constexpr uint32_t ctx_words = 86;
++    const uint32_t ctx_size = ctx_words * 4;
+     const uint32_t sp_orig = read_sp(cpu);
+-    const uint32_t sp_aligned = align_down(sp_orig - ctx_size, 8);
++    // Keep the saved context below the callback's working stack. Placing it
++    // directly under SP lets the Rust handler prologue overwrite FAR/FSR.
++    const uint32_t sp_aligned = align_down(sp_orig - 0x1000 - ctx_size, 8);
+ 
+     auto *ctx = Ptr<uint32_t>(sp_aligned).get(*cpu.mem);
++    std::fill_n(ctx, ctx_words, 0);
+     for (int i = 0; i < 13; i++)
+         ctx[i] = read_reg(cpu, i);
+-    ctx[13] = sp_aligned + ctx_size;
++    ctx[13] = sp_orig;
+     ctx[14] = read_lr(cpu);
+     ctx[15] = read_pc(cpu);
+-    ctx[16] = fault_addr;
++    ctx[84] = fault_addr;
++    ctx[85] = 0;
+ 
+     LOG_DEBUG("DABT handler=0x{:08X} FAR=0x{:08X} PC=0x{:08X} SP=0x{:08X} sp_aligned=0x{:08X}",
+         handler, fault_addr, ctx[15], sp_orig, sp_aligned);
+ 
+     // run_callback saves/restores full CPU context internally
+     run_callback(handler, { sp_aligned });
++
++    // The abort handler patches the faulting JIT instruction and redirects PC
++    // to retry it. Apply its edited integer context after run_callback restores
++    // the interrupted CPU state.
++    for (int i = 0; i < 13; i++)
++        write_reg(cpu, i, ctx[i]);
++    write_sp(cpu, ctx[13]);
++    write_reg(cpu, 14, ctx[14]);
++    write_pc(cpu, ctx[15]);
++
+ }
+ 
+ uint32_t ThreadState::run_guest_function(Address callback_address, SceSize args, const Ptr<void> argp) {
+diff --git a/vita3k/mem/include/mem/functions.h b/vita3k/mem/include/mem/functions.h
+index fdc3cd3..f70df68 100644
+--- a/vita3k/mem/include/mem/functions.h
++++ b/vita3k/mem/include/mem/functions.h
+@@ -59,6 +59,8 @@ void close_access_parent_protect_segment(MemState &state, Address addr);
+ void add_external_mapping(MemState &mem, Address addr, uint32_t size, uint8_t *addr_ptr);
+ void remove_external_mapping(MemState &mem, uint8_t *addr_ptr, uint32_t size);
+ bool is_protecting(MemState &state, Address addr, MemPerm *perm = nullptr);
++void enable_software_protection(MemState &state);
++bool trigger_software_protection(MemState &state, Address addr, bool write);
+ bool is_valid_addr(const MemState &state, Address addr);
+ bool is_valid_addr_range(const MemState &state, Address start, Address end);
+ bool handle_access_violation(MemState &state, uint8_t *addr, bool write) noexcept;
 diff --git a/vita3k/mem/include/mem/state.h b/vita3k/mem/include/mem/state.h
-index 85ce17b..65a13db 100644
+index 85ce17b..d882937 100644
 --- a/vita3k/mem/include/mem/state.h
 +++ b/vita3k/mem/include/mem/state.h
-@@ -77,4 +77,9 @@ struct MemState {
+@@ -77,4 +77,10 @@ struct MemState {
      bool use_page_table = false;
      PageTable page_table;
      std::map<uint64_t, MemExternalMapping, std::greater<>> external_mapping;
++    bool software_protection = false;
 +
 +    // Linux direct-memory mode uses a sparse shared backing file so kubridge
 +    // can alias guest pages with MAP_FIXED while retaining distinct virtual
@@ -13,7 +278,7 @@ index 85ce17b..65a13db 100644
 +    int memory_backing_fd = -1;
  };
 diff --git a/vita3k/mem/src/mem.cpp b/vita3k/mem/src/mem.cpp
-index 28bc81b..287d0db 100644
+index 28bc81b..8b53432 100644
 --- a/vita3k/mem/src/mem.cpp
 +++ b/vita3k/mem/src/mem.cpp
 @@ -32,7 +32,9 @@
@@ -84,7 +349,61 @@ index 28bc81b..287d0db 100644
  
      return align_addr;
  }
-@@ -565,6 +581,12 @@ void deinit_mem(MemState &state) {
+@@ -360,7 +376,8 @@ bool add_protect(MemState &state, Address addr, const uint32_t size, const MemPe
+         state.protect_tree.erase(it--);
+     }
+ 
+-    protect_inner(state, addr, protect.size, protect.perm);
++    if (!state.software_protection)
++        protect_inner(state, addr, protect.size, protect.perm);
+ 
+     state.protect_tree.emplace(addr, std::move(protect));
+     return true;
+@@ -380,6 +397,43 @@ bool is_protecting(MemState &state, Address addr, MemPerm *perm) {
+     return false;
+ }
+ 
++void enable_software_protection(MemState &state) {
++    const std::lock_guard<std::mutex> lock(state.protect_mutex);
++    if (state.software_protection)
++        return;
++
++    // Keep protection metadata, but make the host mappings accessible. Guest
++    // CPU callbacks below will enforce the ranges without also trapping
++    // emulator-side reads and writes to those mappings.
++    for (const auto &[addr, protect] : state.protect_tree)
++        unprotect_inner(state, addr, protect.size);
++    state.software_protection = true;
++}
++
++bool trigger_software_protection(MemState &state, Address addr, bool write) {
++    const std::lock_guard<std::mutex> lock(state.protect_mutex);
++    if (!state.software_protection)
++        return false;
++
++    auto it = state.protect_tree.lower_bound(addr);
++    if (it == state.protect_tree.end() || addr < it->first || addr >= it->first + it->second.size)
++        return false;
++    if (!write && it->second.perm == MemPerm::ReadOnly)
++        return false;
++
++    bool retry_access = true;
++    for (auto &[block_addr, block] : it->second.blocks) {
++        if (addr >= block_addr && addr < block_addr + block.size)
++            retry_access &= block.callback(addr, write);
++    }
++
++    // Match the host page-fault path: a dirty-tracking fault removes the
++    // protection and retries the faulting access. A callback can return false
++    // when it deliberately consumed the access (for example a guest abort).
++    state.protect_tree.erase(it);
++    return !retry_access;
++}
++
+ void add_external_mapping(MemState &mem, Address addr, uint32_t size, uint8_t *addr_ptr) {
+     assert((size & 4095) == 0);
+     if (!mem.use_page_table)
+@@ -565,6 +619,12 @@ void deinit_mem(MemState &state) {
      }
  
      state.memory.reset();
@@ -111,7 +430,7 @@ index d13576e..200fc51 100644
      const auto guard = std::lock_guard<std::mutex>(state->mutex);
  
 diff --git a/vita3k/modules/kubridge/kubridge.cpp b/vita3k/modules/kubridge/kubridge.cpp
-index 362b701..ef05608 100644
+index 362b701..a426fa8 100644
 --- a/vita3k/modules/kubridge/kubridge.cpp
 +++ b/vita3k/modules/kubridge/kubridge.cpp
 @@ -35,6 +35,10 @@
@@ -125,7 +444,32 @@ index 362b701..ef05608 100644
  TRACY_MODULE_NAME(kubridge);
  
  // kubridge protection flags
-@@ -82,6 +86,52 @@ static MemPerm ku_prot_to_memperm(uint32_t prot) {
+@@ -57,6 +61,10 @@ struct KuKernelExceptionHandlerOpt {
+     uint32_t size;
+ };
+ 
++struct KuKernelAbortHandlerOpt {
++    uint32_t size;
++};
++
+ // Page fault callback that triggers an abort handler if one is registered.
+ // Called from signal handler context — must be signal-safe.
+ // Sets abort_pending on the current thread's CPU and halts execution so
+@@ -67,9 +75,11 @@ static bool abort_aware_fault_callback(Address fault_addr, bool write, Address r
+         cpu->abort_fault_addr.store(fault_addr);
+         cpu->abort_is_write.store(write);
+         cpu->abort_pending.store(true);
+-        stop(*cpu); // HaltExecution — signal-safe (atomic only)
++        stop_memory_abort(*cpu); // Preserve the faulting guest PC in Dynarmic.
+     }
+-    return true;
++    // Software protection must not retry this access before the guest abort
++    // handler has mapped or otherwise handled the faulting page.
++    return false;
+ }
+ 
+ // Convert kubridge protection flags to Vita3K MemPerm.
+@@ -82,6 +92,52 @@ static MemPerm ku_prot_to_memperm(uint32_t prot) {
      return MemPerm::None;
  }
  
@@ -178,7 +522,7 @@ index 362b701..ef05608 100644
  // kuKernelMemProtect — change memory protection on a range.
  // Uses add_protect for restrictive permissions (so fault handler can catch access),
  // and unprotect_inner to restore access.
-@@ -92,6 +142,17 @@ EXPORT(int, kuKernelMemProtect, Ptr<void> addr, SceSize len, uint32_t prot) {
+@@ -92,6 +148,17 @@ EXPORT(int, kuKernelMemProtect, Ptr<void> addr, SceSize len, uint32_t prot) {
  
      const MemPerm perm = ku_prot_to_memperm(prot);
  
@@ -196,7 +540,23 @@ index 362b701..ef05608 100644
      if (perm == MemPerm::None || perm == MemPerm::ReadOnly) {
          // Use add_protect so fault handler can catch violations gracefully.
          // If an exception handler is registered, the fault callback will
-@@ -153,8 +214,8 @@ EXPORT(SceUID, kuKernelMemReserve, Ptr<Ptr<void>> addr, SceSize size, SceKernelM
+@@ -134,6 +201,15 @@ EXPORT(SceUID, kuKernelMemReserve, Ptr<Ptr<void>> addr, SceSize size, SceKernelM
+     if (!allocated_addr)
+         return RET_ERROR(SCE_KERNEL_ERROR_NO_MEMORY);
+ 
++    // A reservation has no committed pages yet. DSVita relies on accesses to
++    // the untouched holes (notably its emulated I/O window) faulting into the
++    // registered kubridge abort handler. alloc()/alloc_at() makes the range RW
++    // in Vita3K, so restore reserve semantics until Commit maps selected pages.
++    add_protect(mem, allocated_addr, size, MemPerm::None,
++        [allocated_addr, size](Address fault_addr, bool write) {
++            return abort_aware_fault_callback(fault_addr, write, allocated_addr, size);
++        });
++
+     // Store the allocated address back
+     *addr.get(mem) = Ptr<void>(allocated_addr);
+ 
+@@ -153,8 +229,8 @@ EXPORT(SceUID, kuKernelMemReserve, Ptr<Ptr<void>> addr, SceSize size, SceKernelM
  }
  
  // kuKernelMemCommit — commit physical pages to a reserved range.
@@ -207,7 +567,7 @@ index 362b701..ef05608 100644
  EXPORT(int, kuKernelMemCommit, Ptr<void> addr, SceSize len, uint32_t prot, Ptr<KuKernelMemCommitOpt> pOpt) {
      TRACY_FUNC(kuKernelMemCommit, addr, len, prot, pOpt);
      if (!addr || len == 0)
-@@ -163,8 +224,25 @@ EXPORT(int, kuKernelMemCommit, Ptr<void> addr, SceSize len, uint32_t prot, Ptr<K
+@@ -163,8 +239,25 @@ EXPORT(int, kuKernelMemCommit, Ptr<void> addr, SceSize len, uint32_t prot, Ptr<K
      if (pOpt) {
          auto *opt = pOpt.get(emuenv.mem);
          if (opt->attr & KU_KERNEL_MEM_COMMIT_ATTR_HAS_BASE) {
@@ -235,7 +595,7 @@ index 362b701..ef05608 100644
          }
      }
  
-@@ -193,6 +271,8 @@ EXPORT(int, kuKernelMemDecommit, Ptr<void> addr, SceSize len) {
+@@ -193,6 +286,8 @@ EXPORT(int, kuKernelMemDecommit, Ptr<void> addr, SceSize len) {
          return RET_ERROR(SCE_KERNEL_ERROR_INVALID_ARGUMENT);
  
      const Address va = addr.address();
@@ -244,35 +604,12 @@ index 362b701..ef05608 100644
      add_protect(emuenv.mem, va, len, MemPerm::None, [va, len](Address fault_addr, bool write) {
          return abort_aware_fault_callback(fault_addr, write, va, len);
      });
-diff --git a/vita3k/modules/kubridge/kubridge.cpp b/vita3k/modules/kubridge/kubridge.cpp
---- a/vita3k/modules/kubridge/kubridge.cpp
-+++ b/vita3k/modules/kubridge/kubridge.cpp
-@@ -57,4 +57,8 @@ struct KuKernelExceptionHandlerOpt {
-     uint32_t size;
- };
- 
-+struct KuKernelAbortHandlerOpt {
-+    uint32_t size;
-+};
-+
- // Page fault callback that triggers an abort handler if one is registered.
-@@ -134,4 +138,11 @@ EXPORT(SceUID, kuKernelMemReserve, Ptr<Ptr<void>> addr, SceSize size, SceKernelM
-     if (!allocated_addr)
-         return RET_ERROR(SCE_KERNEL_ERROR_NO_MEMORY);
- 
-+    // A reservation has no committed pages yet. DSVita relies on accesses to
-+    // untouched holes such as its emulated I/O window reaching the abort handler.
-+    add_protect(mem, allocated_addr, size, MemPerm::None,
-+        [allocated_addr, size](Address fault_addr, bool write) {
-+            return abort_aware_fault_callback(fault_addr, write, allocated_addr, size);
-+        });
-+
-     // Store the allocated address back
-@@ -228,4 +241,25 @@ EXPORT(int, kuKernelRegisterExceptionHandler, uint32_t exceptionType,
+@@ -228,6 +323,24 @@ EXPORT(int, kuKernelRegisterExceptionHandler, uint32_t exceptionType,
      return 0;
  }
  
-+// Legacy kubridge 0.3.x data-abort API used by DSVita.
++// Compatibility API used by kubridge 0.3.x and DSVita. It is the data-abort
++// specialization of kuKernelRegisterExceptionHandler.
 +EXPORT(int, kuKernelRegisterAbortHandler, Ptr<void> pHandler,
 +    Ptr<Ptr<void>> pOldHandler, Ptr<KuKernelAbortHandlerOpt> pOpt) {
 +    TRACY_FUNC(kuKernelRegisterAbortHandler, pHandler, pOldHandler, pOpt);
@@ -281,137 +618,50 @@ diff --git a/vita3k/modules/kubridge/kubridge.cpp b/vita3k/modules/kubridge/kubr
 +    if (pOldHandler)
 +        *pOldHandler.get(emuenv.mem) = Ptr<void>(old_handler);
 +
++    enable_software_protection(emuenv.mem);
++    emuenv.kernel.set_software_protection(true);
++
 +    LOG_INFO("kuKernelRegisterAbortHandler: handler=0x{:08X} old=0x{:08X}",
 +        pHandler.address(), old_handler);
 +    return 0;
 +}
 +
-+EXPORT(void, kuKernelFlushCaches, const void *ptr, SceSize len) {
-+    TRACY_FUNC(kuKernelFlushCaches, ptr, len);
+ // kuKernelReleaseExceptionHandler — unregister exception handler.
+ EXPORT(void, kuKernelReleaseExceptionHandler, uint32_t exceptionType) {
+     TRACY_FUNC(kuKernelReleaseExceptionHandler, exceptionType);
+@@ -239,7 +352,9 @@ EXPORT(void, kuKernelReleaseExceptionHandler, uint32_t exceptionType) {
+ 
+ EXPORT(void, kuKernelFlushCaches, const void *ptr, SceSize len) {
+     TRACY_FUNC(kuKernelFlushCaches, ptr, len);
+-    STUBBED("Emulator has no real CPU caches");
 +    const Address addr = static_cast<Address>(reinterpret_cast<uintptr_t>(ptr));
 +    if (addr && len)
 +        emuenv.kernel.invalidate_jit_cache(addr, len);
-+}
-+
- // kuKernelReleaseExceptionHandler — unregister exception handler.
+ }
+ 
+ EXPORT(SceUID, kuKernelAllocMemBlock, const char *name, SceKernelMemBlockType type, SceSize size, SceKernelAllocMemBlockKernelOpt *opt) {
 diff --git a/vita3k/nids/include/nids/nids.inc b/vita3k/nids/include/nids/nids.inc
+index 8250b14..328627e 100644
 --- a/vita3k/nids/include/nids/nids.inc
 +++ b/vita3k/nids/include/nids/nids.inc
-@@ -2503,4 +2503,5 @@ NID(kuKernelMemProtect, 0x566D2AF1)
+@@ -2503,6 +2503,7 @@ NID(kuKernelMemProtect, 0x566D2AF1)
  NID(kuKernelMemReserve, 0xCED3608C)
  NID(kuKernelMemCommit, 0x9C0CD758)
  NID(kuKernelMemDecommit, 0x9BDF5881)
 +NID(kuKernelRegisterAbortHandler, 0x799F5648)
  NID(kuKernelRegisterExceptionHandler, 0xF9025D19)
-diff --git a/vita3k/cpu/include/cpu/functions.h b/vita3k/cpu/include/cpu/functions.h
---- a/vita3k/cpu/include/cpu/functions.h
-+++ b/vita3k/cpu/include/cpu/functions.h
-@@ -30,4 +30,5 @@ CPUStatePtr init_cpu(bool cpu_opt, SceUID thread_id, std::size_t processor_id, M
- int run(CPUState &state);
- int step(CPUState &state);
- void stop(CPUState &state);
-+void stop_memory_abort(CPUState &state);
- void set_thread_id(CPUState &state, SceUID thread_id);
-diff --git a/vita3k/cpu/include/cpu/impl/dynarmic_cpu.h b/vita3k/cpu/include/cpu/impl/dynarmic_cpu.h
---- a/vita3k/cpu/include/cpu/impl/dynarmic_cpu.h
-+++ b/vita3k/cpu/include/cpu/impl/dynarmic_cpu.h
-@@ -52,4 +52,5 @@ public:
-     ~DynarmicCPU() override;
-     int run() override;
-     void stop() override;
-+    void stop_memory_abort() override;
+ NID(kuKernelReleaseExceptionHandler, 0xDF9F3BED)
+ // Module "SceLibc"
+diff --git a/vita3k/renderer/src/texture/cache.cpp b/vita3k/renderer/src/texture/cache.cpp
+index 9f9d927..18ac8fa 100644
+--- a/vita3k/renderer/src/texture/cache.cpp
++++ b/vita3k/renderer/src/texture/cache.cpp
+@@ -39,7 +39,7 @@ namespace renderer {
+ namespace texture {
  
-diff --git a/vita3k/cpu/include/cpu/impl/interface.h b/vita3k/cpu/include/cpu/impl/interface.h
---- a/vita3k/cpu/include/cpu/impl/interface.h
-+++ b/vita3k/cpu/include/cpu/impl/interface.h
-@@ -27,4 +27,5 @@ public:
- 
-     virtual int run() = 0;
-     virtual void stop() = 0;
-+    virtual void stop_memory_abort() = 0;
- 
-diff --git a/vita3k/cpu/src/cpu.cpp b/vita3k/cpu/src/cpu.cpp
---- a/vita3k/cpu/src/cpu.cpp
-+++ b/vita3k/cpu/src/cpu.cpp
-@@ -64,4 +64,8 @@ void stop(CPUState &state) {
-     state.cpu->stop();
+ static uint64_t hash_data(const void *data, size_t size) {
+-    return XXH3_64bits(data, size);
++    return XXH64(data, size, 0);
  }
  
-+void stop_memory_abort(CPUState &state) {
-+    state.cpu->stop_memory_abort();
-+}
-+
- uint32_t read_reg(CPUState &state, size_t index) {
-diff --git a/vita3k/cpu/src/dynarmic_cpu.cpp b/vita3k/cpu/src/dynarmic_cpu.cpp
---- a/vita3k/cpu/src/dynarmic_cpu.cpp
-+++ b/vita3k/cpu/src/dynarmic_cpu.cpp
-@@ -343,4 +343,5 @@ std::unique_ptr<Dynarmic::A32::Jit> DynarmicCPU::make_jit() {
-         config.fastmem_pointer = std::bit_cast<uintptr_t>(parent->mem->memory.get());
-     }
-     config.hook_hint_instructions = true;
-+    config.check_halt_on_memory_access = true;
-     config.enable_cycle_counting = false;
-@@ -419,4 +420,8 @@ void DynarmicCPU::stop() {
-     jit->HaltExecution();
- }
- 
-+void DynarmicCPU::stop_memory_abort() {
-+    jit->HaltExecution(Dynarmic::HaltReason::MemoryAbort);
-+}
-+
- uint32_t DynarmicCPU::get_reg(uint8_t idx) {
-diff --git a/vita3k/kernel/src/thread.cpp b/vita3k/kernel/src/thread.cpp
---- a/vita3k/kernel/src/thread.cpp
-+++ b/vita3k/kernel/src/thread.cpp
-@@ -363,24 +363,31 @@ void ThreadState::dispatch_abort(CPUState &cpu) {
--    // Build KuKernelAbortContext on guest stack for the handler to read.
--    // Note: by the time we get here, the page has already been unprotected
--    // by the protect_tree mechanism, and the CPU may have executed past
--    // the faulting instruction. The handler is called as a notification;
--    // we don't restore from AbortContext afterward.
--    // { r0-r12, sp, lr, pc, FAR } = 17 uint32_t = 68 bytes
--    const uint32_t ctx_size = 17 * 4;
-+    // Complete legacy kubridge 0.3.x KuKernelAbortContext: 16 GPRs,
-+    // 32 64-bit VFP registers, then SPSR/FPSCR/FPEXC/FSR/FAR/type.
-+    constexpr uint32_t ctx_words = 86;
-+    const uint32_t ctx_size = ctx_words * 4;
-     const uint32_t sp_orig = read_sp(cpu);
--    const uint32_t sp_aligned = align_down(sp_orig - ctx_size, 8);
-+    // Keep the saved context below the callback's working stack.
-+    const uint32_t sp_aligned = align_down(sp_orig - 0x1000 - ctx_size, 8);
- 
-     auto *ctx = Ptr<uint32_t>(sp_aligned).get(*cpu.mem);
-+    std::fill_n(ctx, ctx_words, 0);
-     for (int i = 0; i < 13; i++)
-         ctx[i] = read_reg(cpu, i);
--    ctx[13] = sp_aligned + ctx_size;
-+    ctx[13] = sp_orig;
-     ctx[14] = read_lr(cpu);
-     ctx[15] = read_pc(cpu);
--    ctx[16] = fault_addr;
-+    ctx[84] = fault_addr;
-+    ctx[85] = 0;
- 
-     LOG_DEBUG("DABT handler=0x{:08X} FAR=0x{:08X} PC=0x{:08X} SP=0x{:08X} sp_aligned=0x{:08X}",
-         handler, fault_addr, ctx[15], sp_orig, sp_aligned);
- 
-     // run_callback saves/restores full CPU context internally
-     run_callback(handler, { sp_aligned });
-+
-+    // Apply the abort handler's edited context, including its retry PC.
-+    for (int i = 0; i < 13; i++)
-+        write_reg(cpu, i, ctx[i]);
-+    write_sp(cpu, ctx[13]);
-+    write_reg(cpu, 14, ctx[14]);
-+    write_pc(cpu, ctx[15]);
- }
-diff --git a/vita3k/modules/kubridge/kubridge.cpp b/vita3k/modules/kubridge/kubridge.cpp
---- a/vita3k/modules/kubridge/kubridge.cpp
-+++ b/vita3k/modules/kubridge/kubridge.cpp
-@@ -67,5 +67,5 @@ static bool abort_aware_fault_callback(Address fault_addr, bool write, Address r
-         cpu->abort_fault_addr.store(fault_addr);
-         cpu->abort_is_write.store(write);
-         cpu->abort_pending.store(true);
--        stop(*cpu); // HaltExecution — signal-safe (atomic only)
-+        stop_memory_abort(*cpu); // Preserve the faulting guest PC in Dynarmic.
-     }
+ static uint64_t hash_palette_data(const SceGxmTexture &texture, size_t count, const MemState &mem) {

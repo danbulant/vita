@@ -591,8 +591,10 @@ nix-shell -p binutils --run \
 # Result: dsvita::jit::jit_asm::jump_to_other_guest_pc<ARM7>
 ```
 
-The software-protection experiment remains outside the checked-in Vita3K patch
-until the alias correction is rebuilt and shown to advance the actual title.
+The software-protection implementation was initially kept outside the checked-in
+Vita3K patch. It is included now that the later renderer investigation exposed
+and corrected its write-retry semantics, and the resulting build reaches the
+interactive title prompt.
 
 ### 2026-07-26: ARM32 mid-block dispatch and ITCM mirrors
 
@@ -851,3 +853,34 @@ Vita3K texture-cache correctness bug and removes guest-memory aliasing as the
 explanation for these buffers. The next renderer probe should inspect whether
 `upload_texture` replaces the Vulkan image/descriptor for already configured
 textures, and should cover the larger BG/OBJ textures rather than OAM alone.
+
+### 2026-07-26: live post-logo rendering in Vita3K
+
+Forcing Vulkan image/view recreation on every changed cache entry did not alter
+the black viewport, ruling out stale descriptor reuse. A trace across all
+texture dimensions then showed frequent updates for the 192x2 register texture
+and later updates for 256x1 OAM and 512x1 palette textures, but no large BG/OBJ
+uploads. Those larger allocations use Vita3K's page-protection dirty tracking
+instead of hashes.
+
+The missing writes were in the disposable Vita3K software-protection layer.
+Its Dynarmic memory callback invoked the dirty callback and then consumed the
+faulting guest store. Native page-fault handling instead removes the protection
+and retries that store. The software path now erases the protection segment and
+allows ordinary dirty-tracking accesses to continue. Kubridge abort callbacks
+explicitly return false so genuine emulated data aborts remain consumed until
+DSVita's guest handler maps or handles the page.
+
+With both fixes active—XXH64 for one-shot texture change detection and correct
+dirty-write retry—the clean Nintendo logo advances to recognizable live game
+output. Captures show the rotated `Touch me!` prompt and surrounding Rhythm
+Heaven text. Holding XWayland button 1 over the prompt produces a visible
+transition, confirming post-logo touch input still reaches the game. Some cyan
+and blue tile data remains incorrectly composed and the interpreter build runs
+around 5-6 FPS, so rendering and performance are not finished, but the previous
+black-output blocker is removed.
+
+The reusable source changes are now included in
+`patches/vita3k-dsvita-memory.patch`. The patch applies cleanly to Vita3K PR
+3958 commit `d66ef47`; no Vita3K executable or other generated binary is stored
+in this repository.
