@@ -937,3 +937,30 @@ profile remains interpreter-only (`INTERP_THRESHOLD = 255`) and still reaches
 the interactive game screen. Future work should compare the ARM32 block-entry,
 return-stack, and slow-memory calling conventions against a real Vita run before
 enabling translated game code by default.
+
+### 2026-07-26: complete title graphics in Vita3K
+
+The remaining checker pattern was not a palette or VRAM-state error. Shacc's
+four-output `tex2D_gather4` returns one four-neighbour vector for each RGBA
+source channel. The first Vita3K normalization workaround treated
+`values[0]` as one RGBA texel, but it is actually four neighbouring red-channel
+samples. That assembled unrelated tile bytes and happened to retain the cyan
+palette while producing the regular square pattern.
+
+The Vita3K shader path now reconstructs one packed texel from the same neighbour
+of all four gathers: `values[0][0]`, `values[1][0]`, `values[2][0]`, and
+`values[3][0]`. Equivalent normalized decoding was added to OBJ VRAM and OAM
+reads; native Vita keeps its original integer samplers and packed register
+representation.
+
+The resulting Vita3K frame matches the melonDS title reference: both circular
+backgrounds, the Rhythm Heaven logo, stars, copyright text, and the interactive
+touch prompt are present with the expected colors and layout. This is the first
+visually complete game screen in the Vita build. The GPU renderer remains slow
+under the interpreter-only Vita3K compatibility profile, around 5-6 FPS.
+
+`DSVITA_SOFT_2D=1` still renders corrupted vertical tile strips under Vita3K.
+That independent diagnostic now points at its CPU layer construction/upload
+path (possibly emulated NEON), not shared palette state, and is not used by the
+working profile. Both the `vita3k` VPK and the normal native-Vita VPK compile
+successfully after the shader correction.
